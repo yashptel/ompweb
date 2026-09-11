@@ -526,7 +526,7 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
     slashCommands, slashCommandsLoading, queuedMessages, advisorActive, advisorEnabled, handleAdvisorChange,
     notices, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     isAutoModelSelection,
-    agentPhase, activeGoal, activePlan,
+    agentPhase, composerModes, updateComposerModes,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases,
     isNew,
     sessionIdRef, messagesEndRef, scrollContainerRef,
@@ -987,8 +987,8 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
       thinkingLevelMap={currentThinkingLevelMap}
       modelNameOverride={liveModelMeta?.name ?? null}
       retryInfo={retryInfo}
-      activeGoal={activeGoal}
-      activePlan={activePlan}
+      modes={composerModes}
+      onModesChange={updateComposerModes}
       advisorEnabled={advisorEnabled}
       onAdvisorChange={handleAdvisorChange}
       advisorModel={advisorModelMeta}

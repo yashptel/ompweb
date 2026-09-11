@@ -1548,9 +1548,12 @@ export function AppShell() {
         {/* Top bar: 3-zone segmented control bar */}
         <div ref={topBarRef} className="shell-topbar" style={{
           position: "relative",
-          display: "flex",
+          // Grid, not absolute centering: the side zones grow with locale and
+          // session controls, so a fixed centre reservation eventually slides
+          // the breadcrumb underneath them.
+          display: "grid",
+          gridTemplateColumns: "auto minmax(0, 1fr) auto",
           alignItems: "center",
-          justifyContent: "space-between",
           flexShrink: 0,
           borderBottom: "1px solid var(--border)",
           height: isMobile ? 44 : 36,
@@ -1637,21 +1640,27 @@ export function AppShell() {
               <div
                 className="shell-topbar-center"
                 style={{
-                  position: "absolute",
-                  left: "50%",
-                  transform: "translateX(-50%)",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  maxWidth: "min(460px, calc(100% - 380px))",
+                  justifySelf: "stretch",
+                  minWidth: 0,
+                  maxWidth: "100%",
+                  // The pill cannot shrink past its icon and separator, so a
+                  // squeezed track would let it paint over the metric pills.
+                  // Clip here, and the container query hides it entirely once
+                  // the track is too narrow to say anything useful.
+                  overflow: "hidden",
+                  containerType: "inline-size",
                   pointerEvents: "none",
                   zIndex: 10,
                 }}
               >
                 <div
                   className="shell-topbar-breadcrumb"
+                  // display comes from .shell-topbar-breadcrumb so the
+                  // container query can hide the pill in a squeezed track.
                   style={{
-                    display: "inline-flex",
                     alignItems: "center",
                     gap: 6,
                     height: 26,
@@ -1663,7 +1672,7 @@ export function AppShell() {
                     color: "var(--text-muted)",
                     whiteSpace: "nowrap",
                     minWidth: 0,
-                    maxWidth: "min(400px, 30vw)",
+                    maxWidth: "100%",
                     pointerEvents: "auto",
                     flexShrink: 1,
                   }}
@@ -1675,13 +1684,13 @@ export function AppShell() {
                         style={{
                           fontWeight: 600,
                           color: "var(--text)",
-                          flexShrink: 0,
+                          flexShrink: 1,
+                          minWidth: 0,
                           maxWidth: 120,
                           overflow: "hidden",
                           textOverflow: "ellipsis",
                           whiteSpace: "nowrap",
                         }}
-                        title={effectiveProject}
                       >
                         {projectLabel(effectiveProject)}
                       </span>
@@ -1748,7 +1757,7 @@ export function AppShell() {
           <div
             data-topbar-right-group
             style={{
-              marginLeft: "auto",
+              justifySelf: "end",
               display: "flex",
               alignItems: "center",
               gap: 6,

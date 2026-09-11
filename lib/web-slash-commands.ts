@@ -1,12 +1,12 @@
 /**
  * Web-native slash commands (prompt-composing).
  *
- * omp's own `/goal`, `/plan`, `/vibe`, ... are TUI-only builtins (`handleTui`);
+ * omp's own `/review`, `/vibe`, ... are TUI-only builtins (`handleTui`);
  * the RPC prompt path (which omp-web uses) forwards them as literal user text
  * instead of executing them. These client-side commands fill that gap: the
  * palette advertises them and the client built-in dispatcher expands them into
  * effective prompts sent through the normal prompt pipeline, so the agent
- * actually receives a clear instruction rather than a stray "/goal ..." line.
+ * actually receives a clear instruction rather than a stray "/review ..." line.
  *
  * Pure definitions — no I/O. Prompt text is deliberately concise; the args are
  * user-supplied and embedded verbatim.
@@ -15,18 +15,12 @@
 export interface WebSlashCommandDef {
   name: string;
   descriptionKey: string;
-  /** i18n key for the bracketed argument hint shown in the palette, e.g. "[goal]". */
+  /** i18n key for the bracketed argument hint shown in the palette, e.g. "[issue]". */
   argumentHintKey: string;
   /** Commands without args refuse to run and surface usage instead. */
   requiresArgs: boolean;
   buildPrompt: (args: string) => string;
 }
-
-const GOAL_PROMPT = (args: string) =>
-  `Work toward this goal for the rest of the session:\n\n${args}\n\nTreat it as the objective to prioritize when deciding what to do next.`;
-
-const PLAN_PROMPT = (args: string) =>
-  `Create a plan for this task before doing anything else:\n\n${args}\n\nThink it through step by step, list concrete steps, and state what you will verify when done.`;
 
 const REVIEW_PROMPT = (args: string) =>
   args
@@ -66,20 +60,6 @@ const LOOP_PROMPT = (args: string) => {
 };
 
 export const WEB_SLASH_COMMANDS: readonly WebSlashCommandDef[] = [
-  {
-    name: "goal",
-    descriptionKey: "chatInput.cmdGoal",
-    argumentHintKey: "chatInput.cmdGoalArg",
-    requiresArgs: true,
-    buildPrompt: GOAL_PROMPT,
-  },
-  {
-    name: "plan",
-    descriptionKey: "chatInput.cmdPlan",
-    argumentHintKey: "chatInput.cmdPlanArg",
-    requiresArgs: true,
-    buildPrompt: PLAN_PROMPT,
-  },
   {
     name: "review",
     descriptionKey: "chatInput.cmdReview",
@@ -149,7 +129,7 @@ export type WebSlashCommandExpansion =
   | { kind: "not-web" };
 
 /**
- * Resolve a full command line (e.g. "/goal ship the export") into either the
+ * Resolve a full command line (e.g. "/fix the export crash") into either the
  * expanded prompt to send, a usage error for a required-arg command with no
  * args, or "not-web" for commands the client does not own. Single source of
  * truth for both the idle dispatcher and the streaming queue path, so a web

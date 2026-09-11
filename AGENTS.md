@@ -65,6 +65,7 @@ app/api/
   agent/[id]/route.ts             GET state | POST any RPC command
   agent/[id]/events/route.ts      GET SSE stream
   agent/running/events/route.ts   GET SSE stream of currently-running session ids
+  attachments/route.ts            POST multipart `file` uploads → ~/.omp/agent/uploads
   auth/**                         provider list, login/logout, API keys (via RPC)
   cwd/validate/route.ts           POST validate/select a cwd
   default-cwd/route.ts            POST create ~/omp-cwd-YYYYMMDD
@@ -89,6 +90,7 @@ lib/
   file-access.ts       allowed file roots for /api/files and worktrees
   file-paths.ts        client/server path encoding helpers
   markdown.ts          shared markdown helpers
+  pill-editor.ts       DOM helpers for the composer's atomic skill pills
   npx.ts               npx runner used by skill install
   pi-types.ts          local structural types for agent/RPC objects
   project-ordering.ts  pure project sort/group/activity helpers (client + tests)
@@ -96,16 +98,19 @@ lib/
   rpc-manager.ts       session registry + startRpcSession over RpcProcess
   session-reader.ts    session .jsonl parsing + path cache + buildSessionContext
   skills-service.ts    pure-Node skill discovery mirroring omp's providers
+  slash-token.ts       caret-relative "/" token parsing (mirrors omp's rules)
   tool-presets.ts      PRESET_NONE/DEFAULT/FULL + getToolNamesForPreset()
   types.ts             shared TypeScript types
   normalize.ts         normalizeToolCalls() — field name mismatch between file format and our types
   worktree.ts          project/worktree resolution and git worktree operations
+  web-mode-state.ts    composer plan/goal modes + per-prompt preamble
 
 components/
   AppShell.tsx        layout + URL state + tab management
   SessionSidebar.tsx  session tree + FileExplorer
   ChatWindow.tsx      chat composition + completion sound wrapper
   ChatInput.tsx       input bar + model/thinking/tools/compact controls
+  PillEditor.tsx      contenteditable composer host with atomic skill pills
   ComposerPanels.tsx  composer-attached todo + subagent panels (collapsible, live states)
   TodoList.tsx        todo phase grid with preview/show-all (used by ComposerPanels)
   SubagentTranscriptDialog.tsx  task + final output summary dialog (wide, screen-adaptive)
@@ -146,6 +151,74 @@ hooks/
 ### Two kinds of branching — don't confuse them
 - **Fork** (Fork button on user message): creates a new independent `.jsonl` file. Shown as a child in the sidebar tree via `parentSession` header field.
 - **In-session branch** (Continue button / BranchNavigator): navigates the entry tree within the same file. Multiple entries share the same `parentId`. Switching between them calls `/api/sessions/[id]/context?leafId=`.
+
+### Slash tokens are caret-relative, and position changes their meaning
+- `lib/slash-token.ts` derives the composer's active `/` token from the text
+  before the caret, exactly like `extractAtQuery` does for `@`. A token is
+  `kind: "command"` only when nothing but whitespace precedes it; anywhere else
+  it is `kind: "skill"`.
+- That split mirrors omp, not a UI preference. omp parses ordinary slash
+  commands only at position 0 (`parseSlashCommand`), and accepts exactly one
+  extra form mid-prompt: a whitespace-delimited `/skill:<name>` token
+  (`parseSkillInvocation`). So the inline menu offers skills only, and inserts
+  at the caret instead of replacing the draft.
+- omp expands only the FIRST `/skill:` token, and ignores the mid-prompt form
+  entirely when the draft opens with a non-skill command or a `!`/`$` sigil.
+  Those cases do NOT close the menu: the token still reaches the model as
+  literal text, which is useful. `extractSlashToken` reports them through
+  `SlashToken.expands`, and the menu shows the "sent as plain text" note
+  instead of hiding itself.
+
+### The composer is a contenteditable, and skills are atomic inline pills
+- `components/PillEditor.tsx` plus `lib/pill-editor.ts` replaced the composer's
+  `<textarea>`. A skill picked from the `/` menu, or typed out as
+  `/skill:<name> `, becomes a `span.composer-pill[data-skill]` inside the text.
+  `serializeHost` turns pills back into `/skill:<name>` in place, so the string
+  omp receives is unchanged from the textarea era.
+- The editor is UNCONTROLLED. React seeds it once with `defaultValue` and
+  overwrites it only through the imperative `setValue`. Re-rendering the host's
+  children from state destroys the caret on every keystroke, so never turn
+  `value` into a child of that div.
+- Six guards in `lib/pill-editor.ts` each pay for a measured engine bug, not a
+  theory. WebKit's `insertHTML` sanitizer strips `contenteditable="false"`
+  (`reassertPills`); no engine can place a caret past a trailing inline
+  non-editable node and Gecko drops it inside (`ensurePillBoundaries`); a
+  collapsed trailing space has no width so WebKit paints the caret inside the
+  pill (NBSP filler plus `margin: 0 1px`); Blink and WebKit leave the caret
+  before a freshly inserted node (`placeCaretAfterPill`); WebKit silently
+  refuses to delete a non-editable node so deletion is owned in JS; a pill plus
+  its fillers is several caret positions on one visual spot so arrows are owned
+  too. Deleting or weakening one of these breaks exactly one browser.
+- Interaction contract: Backspace collapses the pill's own space first
+  (`data-tight="1"`), the second press removes the pill. Arrows cost one press
+  onto the space and one across the pill.
+- `markPillPrecedence` marks the first pill `data-expands="1"` and the rest
+  `"0"` on every change, because omp expands only the first token; CSS dims the
+  rest.
+- A pill serializes to the same `/skill:<name>` a user could type, so
+  `updateComposerTokens` must close both menus while `hasPillBeforeCaret()` is
+  true. Without that guard the token lift re-pills its own output forever, and
+  the re-opened slash menu swallows the arrow keys that cross the pill.
+- `tests/browser/composer-pill.spec.ts` drives the real composer in Chromium,
+  Firefox and WebKit (`npm run test:browser`, playwright pinned exact). These
+  are the regression net for the six guards; a browser release is the thing
+  most likely to break them.
+
+### Plan and goal are web-hosted modes, not omp's
+- omp's plan/goal modes are real session state with tool guards, but they are
+  TUI-only: `RpcCommand` has no setter and `RpcSessionState` no mode field, so
+  omp-web cannot turn them on. `/plan` and `/goal` sent over RPC reach the
+  model as literal text.
+- omp-web therefore keeps its own `ComposerModes { plan, goal }`
+  (`lib/web-mode-state.ts`), toggled from the composer's `+` menu or the
+  `/plan` and `/goal` commands, persisted per session in `sessionStorage`
+  (`omp-web:modes:<id>`), and shown in `ComposerModeStatus` with an off
+  control.
+- `applyComposerModes` prefixes one short line per active mode onto every
+  prompt in `handleSend`, which mirrors how omp injects its own mode context
+  per turn. The preamble is visible in the transcript because RPC has no
+  hidden-message channel. A leading slash command is exempt: prefixing it
+  would stop omp from dispatching it.
 
 ### ToolCall field normalization
 Sessions store toolCall blocks as `{type:"toolCall", id, name, arguments}` but `ToolCallContent` uses `{toolCallId, toolName, input}`. `normalizeToolCalls()` in `lib/normalize.ts` handles this — called in both `session-reader.ts` (file load) and streaming event handling.
@@ -248,6 +321,23 @@ handled or safely ignored.
 ### File access allow-list
 - `/api/files` is intentionally not a general filesystem browser. Allowed roots come from session cwds, their resolved project roots, `~/omp-cwd-*`, and roots explicitly added with `allowFileRoot()`.
 - `/api/cwd/validate`, `/api/default-cwd`, and `/api/worktrees` call `allowFileRoot()` when they make a new location browsable.
+- `/api/attachments` does the same for `<agent dir>/uploads/<date>/`, so the
+  composer can preview a document it just stored.
+
+### Composer attachments (`lib/chat-attachments.ts`, `/api/attachments`)
+- Text-shaped files inline into the prompt as fenced blocks
+  (`isTextAttachmentFile` covers any `text/*` mime plus a source/config
+  extension table, so csv, json, yaml, logs and code all qualify).
+- Everything else is uploaded to `<agent dir>/uploads/<YYYY-MM-DD>/` and enters
+  the prompt as `Attached file: <name> — read it from <absolute path>`. omp's
+  own `read` tool converts pdf/docx/xlsx/pptx/epub to text
+  (`src/markit/converters/*`), so the path beats anything omp-web could
+  extract. That conversion only reads files on disk, which is why the upload
+  is persisted instead of streamed into the prompt.
+- Stored basenames are sanitized to `[A-Za-z0-9._-]`, prefixed with 6 random
+  bytes, and re-checked with `path.resolve` against the uploads root; the
+  response carries the original display name. Tests:
+  `lib/attachments-route.test.mjs`.
 
 ### Session list caching — new sessions must appear immediately
 - `listAllSessions()` (sidebar, command palette) is cached twice: a 30s TTL

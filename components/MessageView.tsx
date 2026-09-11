@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useState, useRef, useEffect, useMemo, useCallback, type ComponentProps } from "react";
-import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, ChevronDown, Brain, EyeOff, CircleAlert, CircleSlash, LoaderCircle, FileText, Search, FileEdit, Terminal, CheckSquare, Bot, Code2, Globe, Wrench } from "lucide-react";
+import { Box, Copy, Check, GitFork, CornerUpLeft, ChevronRight, ChevronDown, Brain, EyeOff, CircleAlert, CircleSlash, LoaderCircle, FileText, Paperclip, Search, FileEdit, Terminal, CheckSquare, Bot, Code2, Globe, Wrench } from "lucide-react";
 import { MarkdownBody } from "./MarkdownBody";
 import { ClickableImage } from "./ImageLightbox";
 import { translate, useI18n, type Locale } from "@/lib/i18n";
@@ -10,6 +10,9 @@ import { isEmptyThinkingBlock } from "@/lib/message-display";
 import { Tooltip, Collapsible, CollapsibleTrigger } from "./ui/primitives";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { formatCompactNumber } from "@/lib/format";
+import { splitAttachmentReferences } from "@/lib/chat-attachments";
+import { splitLeadingSkillTokens } from "@/lib/composer-skills";
+import { encodeFilePathForApi } from "@/lib/file-paths";
 import { TaskResultPanel } from "./MessageView-task-panel";
 import { getResultDiff, PairedDiffResult, PairedResult } from "./MessageView-diff-view";
 import {
@@ -360,7 +363,63 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
               })}
             </div>
           )}
-          {content && <SafeMarkdownBody className="markdown-user-message" cwd={cwd} onOpenFile={onOpenFile}>{content}</SafeMarkdownBody>}
+          {(() => {
+            const { body: withoutDocuments, documents } = splitAttachmentReferences(content);
+            const { body, skills } = splitLeadingSkillTokens(withoutDocuments);
+            return (
+              <>
+                {skills.length > 0 && (
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: body ? 8 : 0 }}>
+                    {skills.map((skill) => (
+                      <span
+                        key={skill}
+                        style={{
+                          display: "inline-flex", alignItems: "center", gap: 5,
+                          maxWidth: "100%", padding: "2px 9px",
+                          border: "1px solid color-mix(in srgb, var(--accent) 40%, var(--border))",
+                          borderRadius: 999,
+                          background: "color-mix(in srgb, var(--accent) 10%, transparent)",
+                          color: "var(--accent-strong, var(--accent))",
+                          fontSize: 11.5,
+                        }}
+                      >
+                        <Box size={11} strokeWidth={2} style={{ flexShrink: 0 }} aria-hidden="true" />
+                        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{skill}</span>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {body && <SafeMarkdownBody className="markdown-user-message" cwd={cwd} onOpenFile={onOpenFile}>{body}</SafeMarkdownBody>}
+                {documents.length > 0 && (
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: body ? 8 : 0 }}>
+                    {documents.map((document) => (
+                      <a
+                        key={document.path}
+                        href={`/api/files/${encodeFilePathForApi(document.path)}?type=download`}
+                        target="_blank"
+                        rel="noreferrer"
+                        title={document.path}
+                        style={{
+                          display: "inline-flex", alignItems: "center", gap: 6,
+                          maxWidth: "100%", padding: "3px 9px",
+                          border: "1px solid color-mix(in srgb, var(--accent) 24%, var(--border))",
+                          borderRadius: 999,
+                          background: "color-mix(in srgb, var(--accent) 6%, transparent)",
+                          color: "var(--text)", textDecoration: "none",
+                          fontSize: 11.5, fontFamily: "var(--font-mono)",
+                        }}
+                      >
+                        <Paperclip size={11} strokeWidth={1.8} style={{ flexShrink: 0, color: "var(--text-muted)" }} aria-hidden="true" />
+                        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {document.name}
+                        </span>
+                      </a>
+                    ))}
+                  </div>
+                )}
+              </>
+            );
+          })()}
         </div>
 
         {/* Bottom row: action buttons + timestamp — inside the bubble's column,

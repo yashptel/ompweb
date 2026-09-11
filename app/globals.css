@@ -1774,6 +1774,42 @@ span.token.table {
   box-shadow: var(--shadow-card), 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent) !important;
 }
 
+/* Skill pill inside the composer's contenteditable host. The 1px side margins
+   are caret clearance: a collapsed space has no rendered width, so WebKit
+   paints the caret inside the pill's border box without them. */
+.composer-pill {
+  display: inline-flex;
+  align-items: center;
+  margin: 0 1px;
+  padding: 1px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  font-size: 0.94em;
+  line-height: 1.3;
+  white-space: nowrap;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-modify: read-only;
+}
+/* omp expands only the first `/skill:` token in a prompt; the rest reach the
+   model as literal text, so they read as secondary. */
+.composer-pill[data-expands="0"] {
+  opacity: 0.62;
+}
+/* Zero-width so the caret still sits at the text origin, with the label
+   overflowing to the side; the host has no :empty state to hang this on
+   because engines leave fillers and <br> behind. */
+.composer-pill-host[data-empty="true"]::before {
+  content: attr(data-placeholder);
+  display: inline-block;
+  width: 0;
+  white-space: nowrap;
+  color: var(--text-dim);
+  pointer-events: none;
+}
+
 /* Fade + scale/slide entrance utilities for dropdowns, popovers, panels. */
 @keyframes ui-fade-in {
   from { opacity: 0; }
@@ -2738,6 +2774,14 @@ html.dark .dropdown-surface :is(select, option) {
 @media (max-width: 960px) {
   .shell-topbar-center {
     display: none !important;
+  }
+}
+
+/* The centre grid track clips its overflow, so a squeezed breadcrumb would be
+   sliced mid-word rather than overlapping the side zones. Drop it instead. */
+@container (max-width: 150px) {
+  .shell-topbar-breadcrumb {
+    display: none;
   }
 }
 

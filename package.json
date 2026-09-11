@@ -49,7 +49,8 @@
     "tray:start": "node bin/omp-web-tray.js --start",
     "tray:status": "node bin/omp-web-tray.js --status",
     "prepack": "npm run build",
-    "release:check": "npm run typecheck && npm run lint && npm test && npm run build"
+    "release:check": "npm run typecheck && npm run lint && npm test && npm run build",
+    "test:browser": "playwright test"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
@@ -80,6 +81,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.3.4",
     "jiti": "^2.7.0",
+    "playwright": "1.63.0",
     "postcss": "^8",
     "react-test-renderer": "^19.2.8",
     "tailwindcss": "^4.3.3",

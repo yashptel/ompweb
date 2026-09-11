@@ -1,7 +1,8 @@
-import type { ChatDraftFile, ChatDraftImage } from "@/lib/draft-store";
+import type { ChatDraftDocument, ChatDraftFile, ChatDraftImage } from "@/lib/draft-store";
 import {
   MAX_ATTACHED_TEXT_BYTES,
   MAX_ATTACHED_TEXT_FILES,
+  type AttachedDocumentData,
   type AttachedTextFileData,
 } from "@/lib/chat-attachments";
 import {
@@ -47,6 +48,18 @@ export function draftFilesToAttachedFiles(files: ChatDraftFile[] | undefined): A
       && Number.isFinite(file.size)
       && file.size <= MAX_ATTACHED_TEXT_BYTES)
     .slice(0, MAX_ATTACHED_TEXT_FILES);
+}
+
+export function documentToDraftDocument(document: AttachedDocumentData): ChatDraftDocument {
+  return { name: document.name, mimeType: document.mimeType, path: document.path, size: document.size };
+}
+
+export function draftDocumentsToAttachedDocuments(documents: ChatDraftDocument[] | undefined): AttachedDocumentData[] {
+  return (documents ?? []).filter((document) => typeof document.name === "string"
+    && typeof document.mimeType === "string"
+    && typeof document.path === "string"
+    && document.path.length > 0
+    && Number.isFinite(document.size));
 }
 
 export function revokeImagePreview(image: AttachedImage): void {

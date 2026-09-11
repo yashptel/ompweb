@@ -68,7 +68,7 @@ test("keeps the model selector visible when a model error leaves no options", ()
 });
 
 
-test("renders goal, planning, and advisor indicators at the composer", () => {
+test("renders goal, plan-mode, and advisor indicators at the composer", () => {
   const html = renderToStaticMarkup(
     React.createElement(ChatInput, {
       onSend() {},
@@ -78,15 +78,15 @@ test("renders goal, planning, and advisor indicators at the composer", () => {
       model: { provider: "test", modelId: "model" },
       modelList: [{ provider: "test", modelId: "model", id: "model", name: "Test model" }],
       modelNames: {},
-      activeGoal: { objective: "Ship the active goal bar", startedAt: 0 },
-      activePlan: { objective: "Plan the implementation" },
+      modes: { plan: true, goal: { objective: "Ship the active goal bar", startedAt: 0 } },
+      onModesChange() {},
       advisorEnabled: true,
       onAdvisorChange() {},
     }),
   );
 
   assert.match(html, /Ship the active goal bar/);
-  assert.match(html, /(Planning in progress|chatInput\.planningInProgress)/);
+  assert.match(html, /(Plan mode|chatInput\.planMode)/);
   // The advisor toggle moved into the plus menu: no pressed toggle inline,
   // but the plus trigger renders for the same props.
   assert.doesNotMatch(html, /aria-pressed="true"/);

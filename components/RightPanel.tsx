@@ -161,8 +161,10 @@ export const RightPanel = memo(function RightPanel({
           ...(!isMobile && rightPanelWidth !== null ? { "--right-panel-width": `${rightPanelWidth}px` } : {}),
         }}
       >
-        {/* Right panel toolbar: tabs + editor integrations (chat, path, explorer) */}
-        <div style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", height: 36 }}>
+        {/* Right panel toolbar: tabs + editor integrations (chat, path, explorer).
+            The panel toggle is fixed to the window's top-right corner, so the
+            toolbar reserves its width or the last action lands underneath it. */}
+        <div style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", height: 36, paddingRight: isMobile ? 44 : 36 }}>
           <div style={{ flex: 1, overflow: "hidden", minWidth: 0 }}>
             <TabBar
               tabs={fileTabs}

@@ -15,8 +15,11 @@ export function isDormantSkillCommand(command: SlashCommandPaletteItem, dormantN
 }
 
 export const BUILTIN_SLASH_COMMAND_DEFS: { name: string; descriptionKey: string; argumentHintKey?: string }[] = [
-  // Web-native prompt-composing commands (goal/plan/... are TUI-only in omp and
-  // never execute over the RPC prompt path — see lib/web-slash-commands.ts).
+  // Plan and goal are composer modes, not prompts: they flip web-hosted state
+  // that prefixes every later message. omp's same-named builtins are TUI-only.
+  { name: "plan", descriptionKey: "chatInput.cmdPlan" },
+  { name: "goal", descriptionKey: "chatInput.cmdGoal", argumentHintKey: "chatInput.cmdGoalArg" },
+  // Web-native prompt-composing commands (see lib/web-slash-commands.ts).
   ...WEB_SLASH_COMMANDS.map((command) => ({
     name: command.name,
     descriptionKey: command.descriptionKey,

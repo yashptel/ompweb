@@ -21,7 +21,14 @@ import { getPreferredToolPreset, setPreferredToolPreset } from "@/lib/tool-prese
 import { toast } from "@/components/ui/toast";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import { validateOutgoingPrompt } from "@/lib/image-attachments";
-import { createActiveGoal, parseActiveGoal, type ActiveGoal, type ActivePlan } from "@/lib/web-mode-state";
+import {
+  applyComposerModes,
+  createActiveGoal,
+  NO_COMPOSER_MODES,
+  parseComposerModes,
+  serializeComposerModes,
+  type ComposerModes,
+} from "@/lib/web-mode-state";
 import type { HostToolDefinition, HostUriSchemeDefinition, RpcAvailableSlashCommand, SessionStatsInfo, TodoPhase } from "@/lib/pi-types";
 import { isRecord } from "@/lib/type-guards";
 import { subscribeSessionsChanged } from "@/lib/session-change-bus";
@@ -284,8 +291,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [subagentEvents, setSubagentEvents] = useState<Record<string, SubagentActivityEvent[]>>({});
   const [subagentTranscriptVersions, setSubagentTranscriptVersions] = useState<Record<string, number>>({});
   const [todoPhases, setTodoPhases] = useState<TodoPhase[]>([]);
-  const [activeGoal, setActiveGoal] = useState<ActiveGoal | null>(null);
-  const [activePlan, setActivePlan] = useState<ActivePlan | null>(null);
+  const [composerModes, setComposerModes] = useState<ComposerModes>(NO_COMPOSER_MODES);
   const [advisorActiveAt, setAdvisorActiveAt] = useState(0);
   // Advisor is a per-chat toggle (composer Sparkles + /advisor command), not a
   // global setting: each session remembers its own choice in localStorage.
@@ -441,22 +447,24 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } satisfies SessionStatsInfo;
   }, [messages, sessionStatsOverride, contextUsage, data?.filePath, session?.id, session?.name]);
 
-  // Goal mode is web-hosted because omp's native /goal is TUI-only. Keep it
-  // scoped to its session so switching conversations never leaks objectives.
+  // Plan and goal are web-hosted: omp's own modes are TUI-only and the rpc-ui
+  // protocol exposes no command to set them. Keep them scoped to their session
+  // so switching conversations never leaks an objective.
+  const composerModesRef = useRef<ComposerModes>(NO_COMPOSER_MODES);
+
   useEffect(() => {
     const sid = session?.id;
-    setActivePlan(null);
-    if (!sid) {
-      setActiveGoal(null);
-      return;
-    }
-    setActiveGoal(parseActiveGoal(sessionStorage.getItem(`omp-web:goal:${sid}`)));
+    const next = sid ? parseComposerModes(sessionStorage.getItem(`omp-web:modes:${sid}`)) : NO_COMPOSER_MODES;
+    composerModesRef.current = next;
+    setComposerModes(next);
   }, [session?.id]);
 
-  // A plan request is in progress only for its current agent turn.
-  useEffect(() => {
-    if (!agentRunning) setActivePlan(null);
-  }, [agentRunning]);
+  const updateComposerModes = useCallback((next: ComposerModes) => {
+    composerModesRef.current = next;
+    setComposerModes(next);
+    const sid = sessionIdRef.current;
+    if (sid) sessionStorage.setItem(`omp-web:modes:${sid}`, serializeComposerModes(next));
+  }, []);
 
   // First phase that still has unfinished work; null once everything is done
   // (or no todo list exists), which hides the status-line suffix.
@@ -2150,10 +2158,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return true;
     }
 
+    // Web modes ride along with each prompt, mirroring how omp injects its own
+    // mode context per turn. A leading slash command must stay in first
+    // position for omp to dispatch it, so those go through untouched.
+    const outgoing = isSlashCommandPrompt ? message : applyComposerModes(message, composerModesRef.current);
+
     // This is the final dispatch boundary, after web slash commands have been
     // expanded. Keep programmatic callers from entering optimistic state with
     // a body the agent route will reject.
-    const promptError = validateOutgoingPrompt(message, images);
+    const promptError = validateOutgoingPrompt(outgoing, images);
     if (promptError) {
       addNotice({ type: "error", message: promptError });
       return false;
@@ -2162,7 +2175,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const promptRunId = promptRunIdRef.current + 1;
     clearTerminalReconcileTimer();
 
-    const { userMsg, piImages } = buildOutgoingPrompt(message, images);
+    const { userMsg, piImages } = buildOutgoingPrompt(outgoing, images);
     setMessages((prev) => [...prev, userMsg]);
     optimisticUserMessageKeyRef.current = userMessageKey(userMsg);
     promptRunIdRef.current = promptRunId;
@@ -2213,7 +2226,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           }
           await sendAgentCommand(sid, {
             type: "prompt",
-            message,
+            message: outgoing,
             ...(piImages?.length ? { images: piImages } : {}),
           });
         }
@@ -2228,7 +2241,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         void registerHostUriSchemes(session.id);
         await sendAgentCommand(session.id, {
           type: "prompt",
-          message,
+          message: outgoing,
           ...(piImages?.length ? { images: piImages } : {}),
         });
       }
@@ -2723,8 +2736,37 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           return complete({ handled: true, message: translate("agentSession.copiedLastMessage") });
         }
 
+        case "plan": {
+          const next = !composerModesRef.current.plan;
+          updateComposerModes({ ...composerModesRef.current, plan: next });
+          if (next && args) {
+            const sent = await handleSend(args);
+            if (!sent) return { handled: true, retainInput: true };
+            return { handled: true };
+          }
+          return complete({ handled: true, message: translate(next ? "agentSession.planModeOn" : "agentSession.planModeOff") });
+        }
+
+        case "goal": {
+          if (!args) {
+            if (!composerModesRef.current.goal) {
+              return complete({
+                handled: true,
+                error: translate("agentSession.commandRequiresArgs", {
+                  command: "/goal",
+                  usage: translate("chatInput.cmdGoalArg"),
+                }),
+              });
+            }
+            updateComposerModes({ ...composerModesRef.current, goal: null });
+            return complete({ handled: true, message: translate("agentSession.goalCleared") });
+          }
+          updateComposerModes({ ...composerModesRef.current, goal: createActiveGoal(args) });
+          return complete({ handled: true, message: translate("agentSession.goalSet", { objective: args }) });
+        }
+
         default: {
-          // Web-native prompt commands (/goal, /plan, ...). omp's same-named
+          // Web-native prompt commands (/review, /fix, ...). omp's same-named
           // builtins are TUI-only and never execute over RPC, so the palette
           // shows these instead (CLIENT_BUILTIN_COMMAND_NAMES drops omp's
           // copies). handleSend runs the full prompt pipeline — optimistic
@@ -2746,18 +2788,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               }),
             });
           }
-          if (commandName === "plan") setActivePlan({ objective: args });
           const sent = await handleSend(expansion.prompt);
-          if (!sent) {
-            if (commandName === "plan") setActivePlan(null);
-            return { handled: true, retainInput: true };
-          }
-          if (commandName === "goal") {
-            const goal = createActiveGoal(args);
-            setActiveGoal(goal);
-            const activeSessionId = sessionIdRef.current;
-            if (activeSessionId) sessionStorage.setItem(`omp-web:goal:${activeSessionId}`, JSON.stringify(goal));
-          }
+          if (!sent) return { handled: true, retainInput: true };
           return { handled: true };
         }
       }
@@ -2769,7 +2801,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setIsCompacting(false);
       }
     }
-  }, [addNotice, advisorEnabled, ensureNewSession, handleSend, isCompacting, loadModels, loadSession, loadSlashCommands, promoteNewSession, onSessionStatsPanelOpen]);
+  }, [addNotice, advisorEnabled, ensureNewSession, handleSend, isCompacting, loadModels, loadSession, loadSlashCommands, promoteNewSession, updateComposerModes, onSessionStatsPanelOpen]);
 
   // Queued (undelivered) messages live in the queue panel only; the chat gets
   // the real user message when pi delivers it (user message_end event). An
@@ -3150,7 +3182,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     notices: noticeState.visible, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     advisorActive: advisorActiveAt > 0, advisorEnabled, handleAdvisorChange,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases,
-    activeGoal, activePlan,
+    composerModes, updateComposerModes,
     isNew,
     // Refs
     sessionIdRef, messagesEndRef, scrollContainerRef,

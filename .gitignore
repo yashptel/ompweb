@@ -92,3 +92,7 @@ bin/tray-publish/
 
 # npm packaging archives
 *.tgz
+
+# playwright
+test-results/
+playwright-report/

@@ -1,10 +1,10 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { ChevronDown, ListChecks, Loader2, Mic, Paperclip, Plus, Shrink, Sparkles, Wrench, Zap } from "lucide-react";
+import { ChevronDown, ListChecks, Loader2, Mic, Paperclip, Plus, Shrink, Sparkles, Target, Wrench, Zap } from "lucide-react";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
-import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
+import { createActiveGoal, type ComposerModes } from "@/lib/web-mode-state";
 import { toast } from "@/components/ui/toast";
 import { useDictation } from "@/hooks/useDictation";
 import type { GenerationSpeedInfo, SessionStatsInfo } from "@/lib/pi-types";
@@ -12,8 +12,14 @@ import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { ContextDetailPanel } from "./ComposerPanels";
 import { clearDraft, getDraft, setDraft } from "@/lib/draft-store";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
+import { encodeFilePathForApi } from "@/lib/file-paths";
+import { skillNameFromCommandName } from "@/lib/composer-skills";
+import PillEditor from "./PillEditor";
+import type { PillEditorHandle } from "./PillEditor";
 import type { AttachedImage, AttachedTextFile } from "./ChatInput-draft-attachments";
 import {
+  documentToDraftDocument,
+  draftDocumentsToAttachedDocuments,
   draftFilesToAttachedFiles,
   draftImagesToAttachedImages,
   imageToDraftImage,
@@ -43,9 +49,11 @@ import { ModelPickerPanel } from "./ChatInput-model-picker";
 import { ComposerModeStatus, ModelErrorBanner, QueuedActionButton } from "./ChatInput-banners";
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
 import {
-  composeMessageWithTextAttachments,
+  composeMessageWithAttachments,
+  isTextAttachmentFile,
   MAX_ATTACHED_TEXT_BYTES,
   MAX_ATTACHED_TEXT_FILES,
+  type AttachedDocumentData,
 } from "@/lib/chat-attachments";
 import {
   MAX_ATTACHED_IMAGE_BYTES,
@@ -56,6 +64,9 @@ import {
   buildEntriesFromFiles, buildAtInsertText, extractAtQuery, filterFileEntries,
   type AtQueryMatch, type FileIndexEntry,
 } from "@/lib/file-fuzzy";
+import { extractSlashToken, type SlashToken } from "@/lib/slash-token";
+import { ClickableImage } from "./ImageLightbox";
+import { Dialog, DialogContent, DialogTitle } from "./ui/primitives";
 import { FolderIcon, getFileIcon } from "./FileIcons";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/lib/i18n";
@@ -132,8 +143,9 @@ interface Props {
   draftKey?: string;
   /** Session working directory — enables the @ file autocomplete menu */
   cwd?: string | null;
-  activeGoal?: ActiveGoal | null;
-  activePlan?: ActivePlan | null;
+  /** Web-hosted plan/goal modes; every prompt carries their preamble. */
+  modes?: ComposerModes;
+  onModesChange?: (modes: ComposerModes) => void;
   advisorEnabled?: boolean;
   /** Toggle the per-chat advisor (composer icon + /advisor command). */
   onAdvisorChange?: (enabled: boolean) => void;
@@ -252,8 +264,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   onPromoteQueuedToSteer,
   draftKey,
   cwd,
-  activeGoal,
-  activePlan,
+  modes,
+  onModesChange,
   advisorEnabled,
   onAdvisorChange,
   onMinimize,
@@ -271,7 +283,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
   const [plusMenuOpen, setPlusMenuOpen] = useState(false);
-  const [plusExpanded, setPlusExpanded] = useState<"tools" | "advisor" | null>(null);
+  const [plusExpanded, setPlusExpanded] = useState<"tools" | "advisor" | "goal" | null>(null);
   const [modelSearchQuery, setModelSearchQuery] = useState("");
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
@@ -279,12 +291,19 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [attachedTextFiles, setAttachedTextFiles] = useState<AttachedTextFile[]>(() => (
     draftKey ? draftFilesToAttachedFiles(getDraft(draftKey)?.files) : []
   ));
+  const [attachedDocuments, setAttachedDocuments] = useState<AttachedDocumentData[]>(() => (
+    draftKey ? draftDocumentsToAttachedDocuments(getDraft(draftKey)?.documents) : []
+  ));
+  const [uploadingDocumentCount, setUploadingDocumentCount] = useState(0);
   const [attachError, setAttachError] = useState<string | null>(null);
   const trimmedValue = value.trimStart();
-  const bashMode = attachedImages.length === 0 && attachedTextFiles.length === 0 && trimmedValue.startsWith("!");
+  const hasAttachments = attachedImages.length > 0 || attachedTextFiles.length > 0 || attachedDocuments.length > 0;
+  const bashMode = !hasAttachments && trimmedValue.startsWith("!");
   const bashExcluded = bashMode && trimmedValue.startsWith("!!");
+  const [previewTextFile, setPreviewTextFile] = useState<AttachedTextFile | null>(null);
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
+  const [slashToken, setSlashToken] = useState<SlashToken | null>(null);
   const [atQuery, setAtQuery] = useState<AtQueryMatch | null>(null);
   const [atMenuOpen, setAtMenuOpen] = useState(false);
   const [atActiveIndex, setAtActiveIndex] = useState(0);
@@ -294,7 +313,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [fileIndexLoading, setFileIndexLoading] = useState(false);
   const [atServerResult, setAtServerResult] = useState<{ cwd: string; query: string; matches: FileIndexEntry[] } | null>(null);
 
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const editorRef = useRef<PillEditorHandle>(null);
+  const initialDraftRef = useRef(value);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const modelDropdownPanelRef = useRef<HTMLDivElement>(null);
   const modelSearchInputRef = useRef<HTMLInputElement>(null);
@@ -317,6 +337,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const valueRef = useRef(value);
   const attachedImagesRef = useRef(attachedImages);
   const attachedTextFilesRef = useRef(attachedTextFiles);
+  const attachedDocumentsRef = useRef(attachedDocuments);
+  const uploadDocumentsRef = useRef<((files: File[]) => Promise<void>) | null>(null);
   // Bumped whenever the user clears/sends the composer: in-flight FileReader
   // and file.text() reads must not re-append their results afterwards.
   const attachmentRevisionRef = useRef(0);
@@ -325,29 +347,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
   attachedTextFilesRef.current = attachedTextFiles;
+  attachedDocumentsRef.current = attachedDocuments;
 
   const insertTextAtCursor = useCallback((text: string) => {
-    const ta = textareaRef.current;
-    if (!ta) {
-      setValue((v) => v + (v ? " " : "") + text);
-      return;
-    }
-    const start = ta.selectionStart ?? ta.value.length;
-    const end = ta.selectionEnd ?? ta.value.length;
-    const before = ta.value.slice(0, start);
-    const after = ta.value.slice(end);
-    const sep = before.length > 0 && !before.endsWith(" ") ? " " : "";
-    const newVal = before + sep + text + after;
-    setValue(newVal);
+    const editor = editorRef.current;
+    if (!editor) return;
+    const before = editor.getTextBeforeCaret();
+    editor.insertText(before.length > 0 && !/\s$/.test(before) ? ` ${text}` : text);
     setAtQuery(null);
-    requestAnimationFrame(() => {
-      if (!ta) return;
-      const pos = start + sep.length + text.length;
-      ta.setSelectionRange(pos, pos);
-      ta.focus();
-      ta.style.height = "auto";
-      ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
-    });
+    setSlashToken(null);
   }, []);
 
   const { isRecording, isTranscribing, toggle: toggleDictation, cancel: cancelDictation, stop: stopDictation } = useDictation({
@@ -369,37 +377,26 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   useImperativeHandle(ref, () => ({
     focus() {
-      textareaRef.current?.focus();
+      editorRef.current?.focus();
     },
     insertIfEmpty(text: string) {
-      const ta = textareaRef.current;
-      const current = ta ? ta.value : value;
-      if (current.trim()) return;
-      setValue(text);
+      const editor = editorRef.current;
+      if (!editor || !editor.isEmpty()) return;
+      editor.setValue(text);
       setAtQuery(null);
-      requestAnimationFrame(() => {
-        if (!ta) return;
-        ta.focus();
-        ta.style.height = "auto";
-        ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
-      });
+      setSlashToken(null);
+      editor.focus();
     },
     prependText(text: string) {
-      if (!text.trim()) return;
-      const ta = textareaRef.current;
-      const current = ta ? ta.value : value;
+      const editor = editorRef.current;
+      if (!text.trim() || !editor) return;
       // Mirrors the TUI's queue restore: queued text first, then whatever
       // the user already typed, separated by a blank line.
-      const combined = [text, current].filter((t) => t.trim()).join("\n\n");
-      setValue(combined);
+      const combined = [text, editor.getValue()].filter((part) => part.trim()).join("\n\n");
+      editor.setValue(combined);
       setAtQuery(null);
-      requestAnimationFrame(() => {
-        if (!ta) return;
-        ta.focus();
-        ta.setSelectionRange(combined.length, combined.length);
-        ta.style.height = "auto";
-        ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
-      });
+      setSlashToken(null);
+      editor.focus();
     },
     insertText: insertTextAtCursor,
     addFiles(files: File[]) {
@@ -505,20 +502,17 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       if (attachmentRevisionRef.current !== revision) return;
       // Binary content cannot be inlined into the prompt: NUL bytes, or
       // U+FFFD replacement characters left by mis-decoded binary (e.g.
-      // UTF-16 text read as UTF-8).
+      // UTF-16 text read as UTF-8). Those files go to omp as a path instead.
       const newFiles = readFiles.filter(
         (file) => !file.content.includes("\u0000") && !file.content.includes("\uFFFD"),
       );
-      const skipped = textFiles.length - newFiles.length;
+      const binary = textFiles.filter((file) => !newFiles.some((read) => read.name === file.name));
       setAttachedTextFiles((prev) => [
         ...prev,
         ...newFiles.slice(0, Math.max(0, MAX_ATTACHED_TEXT_FILES - prev.length)),
       ]);
-      if (skipped > 0) {
-        setAttachError(`${skipped} file(s) skipped: binary or non-text files cannot be attached.`);
-      } else {
-        setAttachError(null);
-      }
+      setAttachError(null);
+      if (binary.length) void uploadDocumentsRef.current?.(binary);
     } catch {
       setAttachError("One or more files could not be read. Try a different file.");
     } finally {
@@ -526,16 +520,48 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     }
   }, []);
 
+  const processDocumentFiles = useCallback(async (files: File[]) => {
+    if (!files.length) return;
+    const revision = attachmentRevisionRef.current;
+    setUploadingDocumentCount((count) => count + files.length);
+    try {
+      const body = new FormData();
+      for (const file of files) body.append("file", file);
+      const response = await fetch("/api/attachments", { method: "POST", body });
+      const data = await response.json() as { files?: AttachedDocumentData[]; error?: string };
+      if (!response.ok) {
+        setAttachError(data.error ?? "Upload failed. Try a smaller file.");
+        return;
+      }
+      // The composer was cleared/sent while the upload was in flight.
+      if (attachmentRevisionRef.current !== revision) return;
+      setAttachedDocuments((prev) => [...prev, ...(data.files ?? [])]);
+      setAttachError(null);
+    } catch {
+      setAttachError("One or more files could not be uploaded. Try again.");
+    } finally {
+      setUploadingDocumentCount((count) => Math.max(0, count - files.length));
+    }
+  }, []);
+  uploadDocumentsRef.current = processDocumentFiles;
+
   const processFiles = useCallback((files: File[]) => {
     if (isStreaming) {
       setAttachError("Attachments are disabled while the agent is running.");
       return;
     }
-    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
-    const otherFiles = files.filter((file) => !file.type.startsWith("image/"));
-    void processImageFiles(imageFiles);
-    void processTextFiles(otherFiles);
-  }, [isStreaming, processImageFiles, processTextFiles]);
+    const images: File[] = [];
+    const texts: File[] = [];
+    const documents: File[] = [];
+    for (const file of files) {
+      if (file.type.startsWith("image/")) images.push(file);
+      else if (isTextAttachmentFile(file) && file.size <= MAX_ATTACHED_TEXT_BYTES) texts.push(file);
+      else documents.push(file);
+    }
+    void processImageFiles(images);
+    void processTextFiles(texts);
+    void processDocumentFiles(documents);
+  }, [isStreaming, processImageFiles, processTextFiles, processDocumentFiles]);
 
   const removeImage = useCallback((index: number) => {
     setAttachedImages((prev) => {
@@ -549,6 +575,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const removeTextFile = useCallback((index: number) => {
     setAttachedTextFiles((prev) => prev.filter((_, fileIndex) => fileIndex !== index));
+    setAttachError(null);
+  }, []);
+
+  const removeDocument = useCallback((index: number) => {
+    setAttachedDocuments((prev) => prev.filter((_, docIndex) => docIndex !== index));
     setAttachError(null);
   }, []);
 
@@ -566,16 +597,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const clearInput = useCallback(() => {
     setValue("");
     setAtQuery(null);
+    setSlashToken(null);
     setHistoryMenuOpen(false);
     if (draftKey) clearDraft(draftKey);
     if (draftKeyRef.current && draftKeyRef.current !== draftKey) clearDraft(draftKeyRef.current);
     clearImages();
     clearTextFiles();
+    setAttachedDocuments([]);
+    editorRef.current?.clear();
     // Invalidate any attachment reads still in flight.
     attachmentRevisionRef.current += 1;
-    if (textareaRef.current) {
-      textareaRef.current.style.height = "auto";
-    }
   }, [clearImages, clearTextFiles, draftKey]);
 
   useEffect(() => {
@@ -584,8 +615,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       value,
       images: attachedImages.map(imageToDraftImage),
       files: attachedTextFiles.map(textFileToDraftFile),
+      documents: attachedDocuments.map(documentToDraftDocument),
     });
-  }, [attachedImages, attachedTextFiles, draftKey, value]);
+  }, [attachedImages, attachedTextFiles, attachedDocuments, draftKey, value]);
 
   useEffect(() => {
     const previousDraftKey = draftKeyRef.current;
@@ -602,27 +634,26 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         value: valueRef.current,
         images: attachedImagesRef.current.map(imageToDraftImage),
         files: attachedTextFilesRef.current.map(textFileToDraftFile),
+        documents: attachedDocumentsRef.current.map(documentToDraftDocument),
       });
     }
 
     const draft = draftKey ? getDraft(draftKey) : null;
     draftKeyRef.current = draftKey;
-    setValue(draft?.value ?? "");
+    const restored = draft?.value ?? "";
+    setValue(restored);
+    editorRef.current?.setValue(restored);
     setAtQuery(null);
+    setSlashToken(null);
     setHistoryMenuOpen(false);
     setAttachedImages((prev) => {
       prev.forEach(revokeImagePreview);
       return draftImagesToAttachedImages(draft?.images);
     });
     setAttachedTextFiles(draftFilesToAttachedFiles(draft?.files));
+    setAttachedDocuments(draftDocumentsToAttachedDocuments(draft?.documents));
   }, [draftKey]);
 
-  useEffect(() => {
-    const ta = textareaRef.current;
-    if (!ta) return;
-    ta.style.height = "auto";
-    if (value) ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
-  }, [value]);
   useEffect(() => {
     return () => {
       // Drop any reads still in flight when the composer goes away entirely
@@ -652,11 +683,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const handleSend = useCallback(async () => {
     const msg = value.trim();
-    if (!msg && !attachedImages.length && !attachedTextFiles.length) return;
+    if (!msg && !hasAttachments) return;
     if (isStreaming) return;
     onAudioUnlock?.();
-    const composedMessage = composeMessageWithTextAttachments(msg, attachedTextFiles);
-    if (!attachedImages.length && !attachedTextFiles.length && msg.startsWith("/") && onBuiltinCommand) {
+    const composedMessage = composeMessageWithAttachments(msg, attachedTextFiles, attachedDocuments);
+    if (!hasAttachments && msg.startsWith("/") && onBuiltinCommand) {
       const expansion = expandWebSlashCommand(msg);
       if (expansion.kind === "expand" && rejectsOversizedPrompt(expansion.prompt, attachedImages)) return;
       const sentValue = value;
@@ -671,11 +702,25 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (rejectsOversizedPrompt(composedMessage, attachedImages)) return;
     onSend(composedMessage, attachedImages.length ? attachedImages : undefined);
     clearInput();
-  }, [value, attachedImages, attachedTextFiles, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock, rejectsOversizedPrompt]);
+  }, [value, attachedImages, attachedTextFiles, attachedDocuments, hasAttachments, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock, rejectsOversizedPrompt]);
 
-  const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
-    ? value.slice(1).toLowerCase()
-    : null;
+  const slashQuery = slashToken ? slashToken.query.toLowerCase() : null;
+  const slashIsInline = slashToken?.kind === "skill";
+
+  const planActive = modes?.plan ?? false;
+  const goalObjective = modes?.goal?.objective ?? "";
+  const [goalDraft, setGoalDraft] = useState(goalObjective);
+  useEffect(() => {
+    setGoalDraft(goalObjective);
+  }, [goalObjective]);
+
+  const commitGoalDraft = useCallback(() => {
+    if (!onModesChange) return;
+    const objective = goalDraft.trim();
+    onModesChange({ plan: planActive, goal: objective ? createActiveGoal(objective) : null });
+    setPlusExpanded(null);
+    setPlusMenuOpen(false);
+  }, [goalDraft, planActive, onModesChange]);
   const historyFlip = useDropdownFlip(historyMenuOpen && inputHistory.length > 0, historyMenuRef, 0.44, 360);
   const slashFlip = useDropdownFlip(slashMenuOpen && slashQuery !== null, slashMenuRef, 0.56, 460);
   const atFlip = useDropdownFlip(atMenuOpen && atQuery !== null, atMenuRef, 0.48, 400);
@@ -727,7 +772,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const filteredSlashCommands = (() => {
     if (slashQuery === null) return [];
-    const commands = [...(isStreaming ? [] : builtinSlashCommands), ...externalSlashCommands];
+    // Mid-prompt, omp only expands a `/skill:<name>` token: everything else
+    // reaches the model as literal text (parseSkillInvocation in omp).
+    const commands = slashIsInline
+      ? externalSlashCommands.filter((command) => command.source === "skill")
+      : [...(isStreaming ? [] : builtinSlashCommands), ...externalSlashCommands];
     return [...commands]
       .filter((command) => {
         const name = command.name.toLowerCase();
@@ -761,17 +810,54 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     ? tn("chatInput.matchCount", filteredSlashCommands.length)
     : tn("chatInput.commandCount", filteredSlashCommands.length);
 
-  // ── @ file autocomplete ──────────────────────────────────────────────────
-  // Recomputed from the text before the caret on every change/caret move.
-  // Disabled entirely when there is no cwd (new session without a directory).
-  const updateAtQuery = useCallback((text: string, cursor: number | null) => {
+  // ── @ file and / command tokens ──────────────────────────────────────────
+  // Both are recomputed from the caret on every change/caret move. The @ menu
+  // is disabled entirely when there is no cwd (new session without a
+  // directory); the slash menu works everywhere.
+  const updateAtQuery = useCallback((textBeforeCaret: string) => {
     if (!cwd) {
       setAtQuery(null);
       return;
     }
-    const pos = cursor ?? text.length;
-    setAtQuery(extractAtQuery(text.slice(0, pos)));
+    setAtQuery(extractAtQuery(textBeforeCaret));
   }, [cwd]);
+
+
+  const knownSkillNames = React.useMemo(() => {
+    const names = new Set<string>();
+    for (const command of slashCommands ?? []) {
+      const skillName = skillNameFromCommandName(command.name);
+      if (skillName) names.add(skillName);
+    }
+    return names;
+  }, [slashCommands]);
+
+  const updateComposerTokens = useCallback(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const before = editor.getTextBeforeCaret();
+    // A pill serializes to `/skill:<name>` exactly like a typed token, so with
+    // one sitting against the caret both menus must stay shut: reading it as a
+    // live token would re-lift the pill forever and leave the open menu
+    // swallowing the arrow keys that cross it.
+    if (editor.hasPillBeforeCaret()) {
+      setAtQuery(null);
+      setSlashToken(null);
+      return;
+    }
+    // A hand-typed `/skill:<name> ` becomes a pill too, so picking from the
+    // menu and typing it out end in the same place.
+    const typed = /(^|\s)(\/skill:([A-Za-z0-9_.-]+))[ \u00a0]$/.exec(before);
+    if (typed && knownSkillNames.has(typed[3])) {
+      editor.replaceBeforeCaret(typed[2].length + 1, "");
+      editor.insertPill(typed[3]);
+      setAtQuery(null);
+      setSlashToken(null);
+      return;
+    }
+    updateAtQuery(before);
+    setSlashToken(extractSlashToken(before, before.length));
+  }, [updateAtQuery, knownSkillNames]);
 
   const atQueryText = atQuery?.query ?? null;
   const atLocalMatches: FileIndexEntry[] = React.useMemo(() => (
@@ -862,34 +948,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   }, [atTokenActive, cwd]);
 
   const applyAtCompletion = useCallback((entry: FileIndexEntry) => {
-    if (!atQuery) return;
-    const ta = textareaRef.current;
-    const cursor = ta?.selectionStart ?? value.length;
-    const before = value.slice(0, atQuery.start);
-    let after = value.slice(cursor);
-    // Completing inside a quoted token (@"my dir/… with the caret before the
-    // closing quote): the replacement carries its own closing quote, so drop
-    // the old one right after the caret (mirrors the TUI's applyCompletion).
-    if (atQuery.quoted && after.startsWith('"')) {
-      after = after.slice(1);
-    }
+    const editor = editorRef.current;
+    if (!atQuery || !editor) return;
+    const before = editor.getTextBeforeCaret();
     const insert = buildAtInsertText(entry.path, entry.isDir, atQuery.quoted);
-    const newValue = before + insert.text + after;
-    const newPos = before.length + insert.cursorOffset;
-    setValue(newValue);
-    // setValue alone does not fire onChange — re-derive the token here. Files
-    // end with a space (token closes, menu hides); directories end with "/"
-    // before the caret (token stays open for drill-down into the directory).
-    setAtQuery(extractAtQuery(newValue.slice(0, newPos)));
-    requestAnimationFrame(() => {
-      const el = textareaRef.current;
-      if (!el) return;
-      el.focus();
-      el.setSelectionRange(newPos, newPos);
-      el.style.height = "auto";
-      el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
-    });
-  }, [atQuery, value]);
+    editor.replaceBeforeCaret(before.length - atQuery.start, insert.text);
+    editor.focus();
+    // Files end with a space (token closes, menu hides); directories end with
+    // "/" before the caret (token stays open for drill-down).
+    setAtQuery(extractAtQuery(before.slice(0, atQuery.start) + insert.text.slice(0, insert.cursorOffset)));
+  }, [atQuery]);
 
   useEffect(() => {
     if (atActiveIndex >= atMatches.length) {
@@ -922,34 +990,34 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   }, [historyActiveIndex, historyMenuOpen]);
 
   const applyHistoryInput = useCallback((text: string) => {
-    setValue(text);
+    editorRef.current?.setValue(text);
+    editorRef.current?.focus();
     setHistoryMenuOpen(false);
     setHistoryActiveIndex(0);
     setAtQuery(null);
-    requestAnimationFrame(() => {
-      const ta = textareaRef.current;
-      if (!ta) return;
-      ta.focus();
-      ta.setSelectionRange(text.length, text.length);
-      ta.style.height = "auto";
-      ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
-    });
+    setSlashToken(null);
   }, []);
 
   const applySlashCommand = useCallback((command: SlashCommandPaletteItem) => {
-    const nextValue = `/${command.name} `;
-    setValue(nextValue);
+    const editor = editorRef.current;
+    if (!slashToken || !editor) return;
+    const before = editor.getTextBeforeCaret();
+    const consumed = before.length - slashToken.start;
+    // A skill becomes an inline pill in place; every other command is ordinary
+    // text that omp parses at position 0.
+    const skillName = skillNameFromCommandName(command.name);
+    if (skillName) {
+      editor.replaceBeforeCaret(consumed, "");
+      editor.insertPill(skillName);
+      setSlashToken(null);
+    } else {
+      editor.replaceBeforeCaret(consumed, `/${command.name} `);
+      setSlashToken(null);
+    }
+    editor.focus();
     setSlashMenuOpen(false);
     setSlashActiveIndex(0);
-    requestAnimationFrame(() => {
-      const ta = textareaRef.current;
-      if (!ta) return;
-      ta.focus();
-      ta.setSelectionRange(nextValue.length, nextValue.length);
-      ta.style.height = "auto";
-      ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
-    });
-  }, []);
+  }, [slashToken]);
 
   const sendQueued = useCallback((mode: "steer" | "followup") => {
     const msg = value.trim();
@@ -965,8 +1033,27 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         toast.error(t("agentSession.advisorDisabled"));
         return;
       }
+      // Mode commands flip composer state instead of queueing text: the raw
+      // "/plan" would otherwise reach the model as a literal message.
+      if ((commandName === "plan" || commandName === "goal") && onModesChange) {
+        const args = msg.slice(commandName.length + 1).trim();
+        if (commandName === "plan") {
+          onModesChange({ plan: !planActive, goal: modes?.goal ?? null });
+        } else {
+          if (!args && !modes?.goal) {
+            toast.error(t("chatInput.commandUsageTitle"), t("agentSession.commandRequiresArgs", {
+              command: "/goal",
+              usage: t("chatInput.cmdGoalArg"),
+            }));
+            return;
+          }
+          onModesChange({ plan: planActive, goal: args ? createActiveGoal(args) : null });
+        }
+        clearInput();
+        return;
+      }
       // Web commands must be expanded even when queued: the raw slash text
-      // would otherwise reach omp as a literal message (its /goal //plan are
+      // would otherwise reach omp as a literal message (its own /review is
       // TUI-only). Action commands (compact/...) keep the raw text so omp's
       // own ACP handlers can run them.
       const expansion = expandWebSlashCommand(msg);
@@ -995,7 +1082,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       onFollowUp(msg, attachedImages.length ? attachedImages : undefined);
     }
     clearInput();
-  }, [value, attachedImages, attachedTextFiles, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, t, advisorEnabled, rejectsOversizedPrompt]);
+  }, [value, attachedImages, attachedTextFiles, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, t, advisorEnabled, rejectsOversizedPrompt, modes, planActive, onModesChange]);
   // A typed, text-only message during a run is a queued follow-up. Keep Stop
   // as the action while the composer is empty or contains attachments.
   const primaryActionQueuesMessage =
@@ -1020,17 +1107,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const handleItemEdit = useCallback((text: string) => {
     onRemoveQueuedMessage?.(text);
-    setValue(text);
+    editorRef.current?.setValue(text);
+    editorRef.current?.focus();
     setAtQuery(null);
+    setSlashToken(null);
     setHistoryMenuOpen(false);
-    requestAnimationFrame(() => {
-      const ta = textareaRef.current;
-      if (!ta) return;
-      ta.focus();
-      ta.setSelectionRange(text.length, text.length);
-      ta.style.height = "auto";
-      ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
-    });
   }, [onRemoveQueuedMessage]);
 
   const handleItemDelete = useCallback((text: string) => {
@@ -1102,7 +1183,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   }, [filteredSlashCommands.length, slashActiveIndex]);
 
   const handleKeyDown = useCallback(
-    (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    (e: KeyboardEvent<HTMLDivElement>) => {
       const nativeEvent = e.nativeEvent;
       const recentlyComposed = Date.now() - lastCompositionEndAtRef.current < COMPOSITION_END_ENTER_GRACE_MS;
       const isComposing =
@@ -1253,24 +1334,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     [isStreaming, onSteer, onFollowUp, onAbort, onMinimize, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value, isRecording, isTranscribing, cancelDictation, stopDictation, toggleDictation]
   );
 
-  const handleInput = useCallback(() => {
-    const ta = textareaRef.current;
-    if (!ta) return;
-    ta.style.height = "auto";
-    ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
-  }, []);
-
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
     const items = Array.from(e.clipboardData?.items ?? []);
     const imageItems = items.filter((item) => item.type.startsWith("image/"));
-    if (!imageItems.length) return;
-    e.preventDefault();
+    if (!imageItems.length) return false;
     const files = imageItems.map((item) => item.getAsFile()).filter((f): f is File => f !== null);
     processFiles(files);
+    return true;
   }, [processFiles]);
 
+  const slashTokenKey = slashToken === null ? null : `${slashToken.start}:${slashToken.kind}:${slashToken.query}`;
   useEffect(() => {
-    if (slashQuery === null) {
+    if (slashTokenKey === null) {
       setSlashMenuOpen(false);
       setSlashActiveIndex(0);
       slashCommandsRequestedRef.current = false;
@@ -1284,7 +1359,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         slashCommandsRequestedRef.current = false;
       });
     }
-  }, [slashQuery, onLoadSlashCommands]);
+  }, [slashTokenKey, onLoadSlashCommands]);
 
   useEffect(() => {
     if (slashActiveIndex >= filteredSlashCommands.length) {
@@ -1421,7 +1496,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       if (plusMenuRef.current && !plusMenuRef.current.contains(e.target as Node)) {
         setPlusMenuOpen(false);
       }
-      if (historyMenuRef.current && !historyMenuRef.current.contains(e.target as Node) && !textareaRef.current?.contains(e.target as Node)) {
+      if (historyMenuRef.current && !historyMenuRef.current.contains(e.target as Node) && !(e.target as Element | null)?.closest?.(".composer-pill-host")) {
         setHistoryMenuOpen(false);
       }
       if (contextWrapRef.current && !contextWrapRef.current.contains(e.target as Node)) {
@@ -1459,7 +1534,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       />
       <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
         <ModelErrorBanner error={modelError} />
-        <ComposerModeStatus goal={activeGoal} plan={activePlan} />
+        <ComposerModeStatus modes={modes} onChange={onModesChange} />
         {/* Retry banner */}
         {retryInfo && (
           <div style={{
@@ -1525,11 +1600,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
             {attachedImages.map((img, i) => (
               <div key={i} style={{ position: "relative", flexShrink: 0 }}>
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
+                <ClickableImage
                   src={img.previewUrl}
-                  alt=""
-                  style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 6, border: "1px solid var(--border)", display: "block" }}
+                  alt={t("chatInput.attachedImage")}
+                  style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 6, border: "1px solid var(--border)", display: "block", cursor: "zoom-in" }}
                 />
                 <button
                   onClick={() => removeImage(i)}
@@ -1562,7 +1636,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 style={{
                   display: "flex", alignItems: "center", gap: 7,
                   maxWidth: 260, height: 30,
-                  padding: "0 6px 0 9px",
+                  padding: "0 6px 0 0",
                   border: "1px solid var(--border)",
                   borderRadius: 6,
                   background: "var(--bg-panel)",
@@ -1570,24 +1644,35 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   color: "var(--text)",
                 }}
               >
-                <span style={{ flexShrink: 0, display: "flex", color: "var(--text-muted)" }}>
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
-                    <polyline points="14 2 14 8 20 8" />
-                  </svg>
-                </span>
-                <span
-                  title={file.name}
+                <button
+                  type="button"
+                  onClick={() => setPreviewTextFile(file)}
+                  title={t("chatInput.previewFile", { name: file.name })}
                   style={{
-                    minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                    fontFamily: "var(--font-mono)", fontSize: 11.5,
+                    display: "flex", alignItems: "center", gap: 7,
+                    minWidth: 0, height: "100%", padding: "0 0 0 9px",
+                    background: "transparent", border: "none", borderRadius: 6,
+                    color: "inherit", font: "inherit", cursor: "pointer", textAlign: "left",
                   }}
                 >
-                  {file.name}
-                </span>
-                <span style={{ flexShrink: 0, fontSize: 10, color: "var(--text-dim)" }}>
-                  {file.size < 1024 ? `${file.size} B` : `${Math.round(file.size / 1024)} KB`}
-                </span>
+                  <span style={{ flexShrink: 0, display: "flex", color: "var(--text-muted)" }}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
+                      <polyline points="14 2 14 8 20 8" />
+                    </svg>
+                  </span>
+                  <span
+                    style={{
+                      minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                      fontFamily: "var(--font-mono)", fontSize: 11.5,
+                    }}
+                  >
+                    {file.name}
+                  </span>
+                  <span style={{ flexShrink: 0, fontSize: 10, color: "var(--text-dim)" }}>
+                    {file.size < 1024 ? `${file.size} B` : `${Math.round(file.size / 1024)} KB`}
+                  </span>
+                </button>
                 <button
                   onClick={() => removeTextFile(i)}
                   title="Remove file"
@@ -1611,6 +1696,89 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             ))}
           </div>
         )}
+        {(attachedDocuments.length > 0 || uploadingDocumentCount > 0) && (
+          <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap", alignItems: "center" }}>
+            {attachedDocuments.map((doc, i) => (
+              <div
+                key={doc.path}
+                style={{
+                  display: "flex", alignItems: "center", gap: 7,
+                  maxWidth: 280, height: 30,
+                  padding: "0 6px 0 0",
+                  border: "1px solid var(--border)",
+                  borderRadius: 6,
+                  background: "var(--bg-panel)",
+                  fontSize: 12,
+                  color: "var(--text)",
+                }}
+              >
+                <a
+                  href={`/api/files/${encodeFilePathForApi(doc.path)}?type=download`}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={t("chatInput.previewFile", { name: doc.name })}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 7,
+                    minWidth: 0, height: "100%", padding: "0 0 0 9px",
+                    color: "inherit", textDecoration: "none",
+                  }}
+                >
+                  <Paperclip size={12} strokeWidth={1.8} style={{ flexShrink: 0, color: "var(--text-muted)" }} aria-hidden="true" />
+                  <span style={{
+                    minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                    fontFamily: "var(--font-mono)", fontSize: 11.5,
+                  }}>
+                    {doc.name}
+                  </span>
+                  <span style={{ flexShrink: 0, fontSize: 10, color: "var(--text-dim)" }}>
+                    {doc.size < 1024 ? `${doc.size} B` : `${Math.round(doc.size / 1024)} KB`}
+                  </span>
+                </a>
+                <button
+                  onClick={() => removeDocument(i)}
+                  title="Remove file"
+                  aria-label="Remove file"
+                  style={{
+                    flexShrink: 0, width: 18, height: 18,
+                    borderRadius: "50%",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    background: "transparent", border: "none",
+                    cursor: "pointer", padding: 0, color: "var(--text-muted)",
+                  }}
+                >
+                  <svg width="9" height="9" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                    <line x1="1" y1="1" x2="7" y2="7" /><line x1="7" y1="1" x2="1" y2="7" />
+                  </svg>
+                </button>
+              </div>
+            ))}
+            {uploadingDocumentCount > 0 && (
+              <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--text-dim)" }}>
+                <Loader2 size={12} strokeWidth={2} className="spin" aria-hidden="true" />
+                {t("chatInput.uploadingFiles", { count: String(uploadingDocumentCount) })}
+              </span>
+            )}
+          </div>
+        )}
+        <Dialog open={previewTextFile !== null} onOpenChange={(open) => { if (!open) setPreviewTextFile(null); }}>
+          <DialogContent
+            ariaLabel={previewTextFile?.name ?? ""}
+            style={{ width: "min(860px, 92vw)", maxWidth: "min(860px, 92vw)", maxHeight: "82vh", display: "flex", flexDirection: "column", overflow: "hidden" }}
+          >
+            <DialogTitle style={{ fontFamily: "var(--font-mono)", fontSize: 15, wordBreak: "break-all" }}>
+              {previewTextFile?.name}
+            </DialogTitle>
+            <pre style={{
+              flex: 1, minWidth: 0, minHeight: 0, overflowY: "auto", overflowX: "hidden", margin: 0,
+              padding: 12, borderRadius: "var(--radius-control)",
+              border: "1px solid var(--border)", background: "var(--bg-subtle)",
+              fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55,
+              whiteSpace: "pre-wrap", overflowWrap: "anywhere", wordBreak: "break-word", color: "var(--text)",
+            }}>
+              {previewTextFile?.content}
+            </pre>
+          </DialogContent>
+        </Dialog>
 
         {/* Main input */}
         <div style={{ position: "relative" }}>
@@ -1713,6 +1881,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             <div
               ref={slashMenuRef}
               className="dropdown-surface"
+              data-testid="composer-slash-menu"
               style={{
                 position: "absolute",
                 left: 0,
@@ -1736,9 +1905,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   flexShrink: 0,
                 }}
               >
-                <span>{slashCommandsLoading ? t("chatInput.loadingCommands") : t("chatInput.slashCommandsHeader", { countLabel: slashCommandCountLabel })}</span>
+                <span>{slashCommandsLoading
+                  ? t("chatInput.loadingCommands")
+                  : slashIsInline
+                    ? t("chatInput.slashSkillsHeader", { countLabel: slashCommandCountLabel })
+                    : t("chatInput.slashCommandsHeader", { countLabel: slashCommandCountLabel })}</span>
                 <span style={{ fontFamily: "var(--font-mono)" }}>{t("chatInput.tabEnterHint")}</span>
               </div>
+              {slashIsInline && slashToken?.expands === false && (
+                <div style={{ padding: "6px 10px", borderBottom: "1px solid var(--border)", fontSize: 11, color: "var(--text-dim)", flexShrink: 0 }}>
+                  {t("chatInput.slashFirstSkillOnly")}
+                </div>
+              )}
               <div
                 style={{
                   flex: 1,
@@ -2200,45 +2378,31 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               transition: "border-color var(--dur-fast) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm), box-shadow var(--dur-fast) var(--ease-out-warm)",
             } as React.CSSProperties}
           >
-          <textarea
-            ref={textareaRef}
-            value={value}
-            onChange={(e) => {
-              setValue(e.target.value);
+          <PillEditor
+            ref={editorRef}
+            defaultValue={initialDraftRef.current}
+            onValueChange={(next) => {
+              setValue(next);
               setHistoryMenuOpen(false);
-              updateAtQuery(e.target.value, e.target.selectionStart);
             }}
-            onSelect={(e) => {
-              const el = e.currentTarget;
-              updateAtQuery(el.value, el.selectionStart);
-            }}
+            onCaretChange={updateComposerTokens}
             onKeyDown={handleKeyDown}
-            onCompositionStart={() => {
-              isComposingRef.current = true;
+            onCompositionStateChange={(composing) => {
+              isComposingRef.current = composing;
+              if (!composing) lastCompositionEndAtRef.current = Date.now();
             }}
-            onCompositionEnd={(e) => {
-              isComposingRef.current = false;
-              lastCompositionEndAtRef.current = Date.now();
-              const el = e.currentTarget;
-              updateAtQuery(el.value, el.selectionStart);
-            }}
-            onInput={handleInput}
+            pillTitles={{ expands: t("chatInput.skillChipFirst"), literal: t("chatInput.skillChipLiteral") }}
             onPaste={handlePaste}
             placeholder={t("chatInput.placeholder")}
-            rows={1}
+            disabled={false}
+            maxHeight={200}
             style={{
               width: "100%",
-              background: "none",
-              border: "none",
-              outline: "none",
-              resize: "none",
               color: "var(--text)",
               fontSize: "var(--chat-user-font-size)",
               lineHeight: "var(--chat-line-height)",
               fontFamily: "inherit",
               minHeight: 24,
-              maxHeight: 200,
-              overflow: "auto",
             }}
           />
 
@@ -2346,6 +2510,74 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                           </button>
                         );
                       })}
+                    </>
+                  )}
+                  {onModesChange && (
+                    <>
+                      <button
+                        role="menuitemcheckbox"
+                        aria-checked={planActive}
+                        onClick={() => { setPlusMenuOpen(false); onModesChange({ plan: !planActive, goal: modes?.goal ?? null }); }}
+                        title={`${t("chatInput.planModeHint")}\n${t("chatInput.modeWebOnly")}`}
+                        style={{
+                          display: "flex", alignItems: "center", gap: 8, width: "100%",
+                          padding: "7px 10px", border: 0, borderRadius: 5,
+                          background: "transparent",
+                          color: planActive ? "var(--accent)" : "var(--text-muted)", cursor: "pointer", fontSize: 12, textAlign: "left",
+                        }}
+                      >
+                        <ListChecks size={12} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden="true" />
+                        <span style={{ flex: 1 }}>{t("chatInput.planMode")}</span>
+                        <span style={{ color: "var(--text-dim)" }}>{planActive ? t("chatInput.plusOn") : t("chatInput.plusOff")}</span>
+                      </button>
+                      <button
+                        role="menuitem"
+                        aria-expanded={plusExpanded === "goal"}
+                        onClick={() => setPlusExpanded((v) => (v === "goal" ? null : "goal"))}
+                        title={`${t("chatInput.goalModeHint")}\n${t("chatInput.modeWebOnly")}`}
+                        style={{
+                          display: "flex", alignItems: "center", gap: 8, width: "100%",
+                          padding: "7px 10px", border: 0, borderRadius: 5,
+                          background: plusExpanded === "goal" ? "var(--bg-selected)" : "transparent",
+                          color: modes?.goal ? "var(--accent)" : "var(--text-muted)", cursor: "pointer", fontSize: 12, textAlign: "left",
+                        }}
+                      >
+                        <Target size={12} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden="true" />
+                        <span style={{ flex: 1 }}>{t("chatInput.goalMode")}</span>
+                        <span style={{ color: "var(--text-dim)" }}>{modes?.goal ? t("chatInput.plusOn") : t("chatInput.plusOff")}</span>
+                        <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7, transform: plusExpanded === "goal" ? "rotate(180deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }} aria-hidden="true" />
+                      </button>
+                      {plusExpanded === "goal" && (
+                        <div style={{ display: "flex", gap: 6, padding: "4px 10px 8px 30px" }}>
+                          <input
+                            value={goalDraft}
+                            autoFocus
+                            onChange={(e) => setGoalDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key !== "Enter") return;
+                              e.preventDefault();
+                              commitGoalDraft();
+                            }}
+                            placeholder={t("chatInput.setGoalPlaceholder")}
+                            aria-label={t("chatInput.setGoalPlaceholder")}
+                            style={{
+                              flex: 1, minWidth: 0, padding: "4px 7px", fontSize: 12,
+                              border: "1px solid var(--border)", borderRadius: 5,
+                              background: "var(--bg)", color: "var(--text)",
+                            }}
+                          />
+                          {modes?.goal && (
+                            <button
+                              type="button"
+                              onClick={() => { setGoalDraft(""); onModesChange({ plan: planActive, goal: null }); }}
+                              title={t("chatInput.clearGoal")}
+                              style={{ padding: "4px 8px", fontSize: 11, border: "1px solid var(--border)", borderRadius: 5, background: "var(--bg-panel)", color: "var(--text-muted)", cursor: "pointer" }}
+                            >
+                              {t("chatInput.clearGoal")}
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </>
                   )}
                   {onAdvisorChange && (

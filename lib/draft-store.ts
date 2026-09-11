@@ -10,10 +10,18 @@ export interface ChatDraftFile {
   size: number;
 }
 
+export interface ChatDraftDocument {
+  name: string;
+  mimeType: string;
+  path: string;
+  size: number;
+}
+
 export interface ChatDraft {
   value: string;
   images: ChatDraftImage[];
   files: ChatDraftFile[];
+  documents: ChatDraftDocument[];
 }
 
 // globalThis so dev Fast Refresh doesn't wipe drafts mid-typing.
@@ -29,11 +37,15 @@ function cloneDraft(draft: ChatDraft): ChatDraft {
     value: draft.value,
     images: draft.images.map((image) => ({ ...image })),
     files: draft.files.map((file) => ({ ...file })),
+    documents: (draft.documents ?? []).map((document) => ({ ...document })),
   };
 }
 
 function isEmptyDraft(draft: ChatDraft): boolean {
-  return !draft.value && draft.images.length === 0 && draft.files.length === 0;
+  return !draft.value
+    && draft.images.length === 0
+    && draft.files.length === 0
+    && (draft.documents?.length ?? 0) === 0;
 }
 
 export function getDraft(key: string): ChatDraft | null {
@@ -46,7 +58,7 @@ export function getDraftSummary(key: string): { text: string; hasAttachments: bo
   if (!draft) return { text: "", hasAttachments: false };
   return {
     text: draft.value,
-    hasAttachments: draft.images.length > 0 || draft.files.length > 0,
+    hasAttachments: draft.images.length > 0 || draft.files.length > 0 || (draft.documents?.length ?? 0) > 0,
   };
 }
 

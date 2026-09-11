@@ -1,8 +1,8 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { ListChecks, Target } from "lucide-react";
-import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
+import { ListChecks, Target, X } from "lucide-react";
+import type { ComposerModes } from "@/lib/web-mode-state";
 import { formatGoalElapsed } from "@/lib/web-mode-state";
 import { useI18n } from "@/lib/i18n";
 
@@ -95,10 +95,12 @@ export function ModelErrorBanner({ error }: { error?: string | null }) {
   );
 }
 
-export function ComposerModeStatus({ goal, plan }: { goal?: ActiveGoal | null; plan?: ActivePlan | null }) {
+export function ComposerModeStatus({ modes, onChange }: { modes?: ComposerModes | null; onChange?: (modes: ComposerModes) => void }) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  const goal = modes?.goal ?? null;
+  const plan = modes?.plan ?? false;
 
   useEffect(() => {
     if (!goal) return;
@@ -112,37 +114,60 @@ export function ComposerModeStatus({ goal, plan }: { goal?: ActiveGoal | null; p
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 }}>
       {goal && (
-        <button
-          type="button"
-          aria-expanded={expanded}
-          onClick={() => setExpanded((value) => !value)}
-          title={expanded ? t("chatInput.collapseGoal") : t("chatInput.expandGoal")}
-          style={{
-            display: "flex", alignItems: expanded ? "flex-start" : "center", gap: 8,
-            width: "100%", padding: "6px 9px",
-            border: "1px solid color-mix(in srgb, var(--accent) 32%, var(--border))",
-            borderRadius: "var(--radius-control)",
-            background: "color-mix(in srgb, var(--accent) 7%, var(--bg-panel))",
-            color: "var(--text)", cursor: "pointer", textAlign: "left",
-            transition: "background var(--dur-fast) var(--ease-out-warm), border-color var(--dur-fast) var(--ease-out-warm)",
-          }}
-        >
-          <Target size={14} strokeWidth={2} style={{ flexShrink: 0, marginTop: expanded ? 1 : 0, color: "var(--accent)" }} aria-hidden="true" />
-          <span style={{ flexShrink: 0, color: "var(--text-dim)", fontSize: 10, fontFamily: "var(--font-mono)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
-            {t("chatInput.goalActive")} · {formatGoalElapsed(now - goal.startedAt)}
-          </span>
-          <span style={{ minWidth: 0, flex: 1, overflow: expanded ? "visible" : "hidden", textOverflow: expanded ? undefined : "ellipsis", whiteSpace: expanded ? "pre-wrap" : "nowrap", fontSize: 12, lineHeight: 1.4 }}>
-            {goal.objective}
-          </span>
-        </button>
+        <div style={{ display: "flex", alignItems: "stretch", gap: 4 }}>
+          <button
+            type="button"
+            aria-expanded={expanded}
+            onClick={() => setExpanded((value) => !value)}
+            title={expanded ? t("chatInput.collapseGoal") : t("chatInput.expandGoal")}
+            style={{
+              display: "flex", alignItems: expanded ? "flex-start" : "center", gap: 8,
+              flex: 1, minWidth: 0, padding: "6px 9px",
+              border: "1px solid color-mix(in srgb, var(--accent) 32%, var(--border))",
+              borderRadius: "var(--radius-control)",
+              background: "color-mix(in srgb, var(--accent) 7%, var(--bg-panel))",
+              color: "var(--text)", cursor: "pointer", textAlign: "left",
+              transition: "background var(--dur-fast) var(--ease-out-warm), border-color var(--dur-fast) var(--ease-out-warm)",
+            }}
+          >
+            <Target size={14} strokeWidth={2} style={{ flexShrink: 0, marginTop: expanded ? 1 : 0, color: "var(--accent)" }} aria-hidden="true" />
+            <span style={{ flexShrink: 0, color: "var(--text-dim)", fontSize: 10, fontFamily: "var(--font-mono)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
+              {t("chatInput.goalActive")} · {formatGoalElapsed(now - goal.startedAt)}
+            </span>
+            <span style={{ minWidth: 0, flex: 1, overflow: expanded ? "visible" : "hidden", textOverflow: expanded ? undefined : "ellipsis", whiteSpace: expanded ? "pre-wrap" : "nowrap", fontSize: 12, lineHeight: 1.4 }}>
+              {goal.objective}
+            </span>
+          </button>
+          {onChange && <ModeOffButton title={t("chatInput.clearGoal")} onClick={() => onChange({ plan, goal: null })} />}
+        </div>
       )}
       {plan && (
         <div role="status" aria-live="polite" style={{ display: "flex", alignItems: "center", gap: 7, padding: "5px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text-muted)", fontSize: 12 }}>
           <ListChecks size={14} strokeWidth={2} style={{ flexShrink: 0, color: "var(--accent)" }} aria-hidden="true" />
-          <span style={{ fontWeight: 600 }}>{t("chatInput.planningInProgress")}</span>
-          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)" }}>{plan.objective}</span>
+          <span style={{ fontWeight: 600 }}>{t("chatInput.planMode")}</span>
+          <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)" }}>{t("chatInput.planModeHint")}</span>
+          {onChange && <ModeOffButton title={t("chatInput.planMode")} onClick={() => onChange({ plan: false, goal })} />}
         </div>
       )}
     </div>
+  );
+}
+
+function ModeOffButton({ title, onClick }: { title: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      aria-label={title}
+      style={{
+        display: "flex", alignItems: "center", justifyContent: "center",
+        width: 26, flexShrink: 0, padding: 0,
+        border: "1px solid var(--border)", borderRadius: "var(--radius-control)",
+        background: "var(--bg-panel)", color: "var(--text-dim)", cursor: "pointer",
+      }}
+    >
+      <X size={12} strokeWidth={2} aria-hidden="true" />
+    </button>
   );
 }
