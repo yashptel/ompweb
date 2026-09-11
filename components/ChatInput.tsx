@@ -6,6 +6,7 @@ import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import { createActiveGoal, type ComposerModes } from "@/lib/web-mode-state";
 import { toast } from "@/components/ui/toast";
+import { ConfirmDialog } from "@/components/ui/field";
 import { useDictation } from "@/hooks/useDictation";
 import type { GenerationSpeedInfo, SessionStatsInfo } from "@/lib/pi-types";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
@@ -50,9 +51,12 @@ import { ComposerModeStatus, ModelErrorBanner, QueuedActionButton } from "./Chat
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
 import {
   composeMessageWithAttachments,
+  describeTextAttachmentSkip,
+  formatAttachmentBytes,
   isTextAttachmentFile,
   MAX_ATTACHED_TEXT_BYTES,
   MAX_ATTACHED_TEXT_FILES,
+  selectTextAttachments,
   type AttachedDocumentData,
 } from "@/lib/chat-attachments";
 import {
@@ -279,6 +283,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     [locale],
   );
   const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
+  const [queuedDeleteTarget, setQueuedDeleteTarget] = useState<{
+    text: string;
+    draftKey: string | undefined;
+    queue: Props["queuedMessages"];
+  } | null>(null);
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
@@ -344,6 +353,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const attachmentRevisionRef = useRef(0);
   const pendingImageCountRef = useRef(0);
   const pendingTextFileCountRef = useRef(0);
+  const pendingTextFileBytesRef = useRef(0);
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
   attachedTextFilesRef.current = attachedTextFiles;
@@ -420,7 +430,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         setAttachError(
           remaining === 0
             ? `Maximum of ${MAX_ATTACHED_IMAGES} attached images reached.`
-            : `${files.length} image(s) skipped: images up to ${Math.round(MAX_ATTACHED_IMAGE_BYTES / 1024 / 1024)} MB are supported.`,
+            : `${files.length} image(s) skipped: images up to ${formatAttachmentBytes(MAX_ATTACHED_IMAGE_BYTES)} are supported.`,
         );
       }
       return;
@@ -473,21 +483,24 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       0,
       MAX_ATTACHED_TEXT_FILES - attachedTextFilesRef.current.length - pendingTextFileCountRef.current,
     );
-    const textFiles = files
-      .filter((file) => file.size <= MAX_ATTACHED_TEXT_BYTES)
-      .slice(0, remaining);
+    // In-flight batches reserve their bytes too, so two overlapping drops
+    // cannot each fit under the aggregate budget on their own.
+    const { accepted: textFiles, tooLarge, overBudget } = selectTextAttachments(files, {
+      usedBytes: attachedTextFilesRef.current.reduce((total, file) => total + file.size, 0) + pendingTextFileBytesRef.current,
+      usedSlots: attachedTextFilesRef.current.length + pendingTextFileCountRef.current,
+    });
+    // Report every dropped candidate, not just an entirely rejected batch: a
+    // drop of several files can lose some to the budget while accepting others.
+    const limitMessage = remaining === 0 && files.length > 0
+      ? `Maximum of ${MAX_ATTACHED_TEXT_FILES} text files reached.`
+      : describeTextAttachmentSkip({ tooLarge, overBudget });
     if (!textFiles.length) {
-      if (files.length > 0) {
-        setAttachError(
-          remaining === 0
-            ? `Maximum of ${MAX_ATTACHED_TEXT_FILES} text files reached.`
-            : `${files.length} file(s) skipped: files up to ${Math.round(MAX_ATTACHED_TEXT_BYTES / 1024)} KB are supported.`,
-        );
-      }
+      if (files.length > 0) setAttachError(limitMessage ?? `${files.length} file(s) skipped.`);
       return;
     }
     const revision = attachmentRevisionRef.current;
     pendingTextFileCountRef.current += textFiles.length;
+    pendingTextFileBytesRef.current += textFiles.reduce((total, file) => total + file.size, 0);
     try {
       const readFiles = await Promise.all(
         textFiles.map(async (file): Promise<AttachedTextFile> => ({
@@ -511,12 +524,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         ...prev,
         ...newFiles.slice(0, Math.max(0, MAX_ATTACHED_TEXT_FILES - prev.length)),
       ]);
-      setAttachError(null);
+      setAttachError(limitMessage ?? null);
+      // Binary files are not a skip any more: they upload and come back as a
+      // path chip, which is what omp's own read tool can open.
       if (binary.length) void uploadDocumentsRef.current?.(binary);
     } catch {
       setAttachError("One or more files could not be read. Try a different file.");
     } finally {
       pendingTextFileCountRef.current -= textFiles.length;
+      pendingTextFileBytesRef.current -= textFiles.reduce((total, file) => total + file.size, 0);
     }
   }, []);
 
@@ -628,6 +644,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     // validation banner along with the old draft.
     attachmentRevisionRef.current += 1;
     setAttachError(null);
+    setQueuedDeleteTarget(null);
 
     if (previousDraftKey) {
       setDraft(previousDraftKey, {
@@ -1104,6 +1121,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const queuedCount = queuedEntries.length;
 
   const [queueExpanded, setQueueExpanded] = useState(false);
+  // Invalidate confirmation if delivery or navigation changes the queue.
+  const activeDeleteTarget = queuedDeleteTarget?.draftKey === draftKey
+    && queuedDeleteTarget?.queue === queuedMessages ? queuedDeleteTarget : null;
 
   const handleItemEdit = useCallback((text: string) => {
     onRemoveQueuedMessage?.(text);
@@ -1115,8 +1135,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   }, [onRemoveQueuedMessage]);
 
   const handleItemDelete = useCallback((text: string) => {
-    onRemoveQueuedMessage?.(text);
-  }, [onRemoveQueuedMessage]);
+    setQueuedDeleteTarget({ text, draftKey, queue: queuedMessages });
+  }, [draftKey, queuedMessages]);
 
   const handleItemSteer = useCallback((entry: { kind: "follow-up" | "steer"; text: string }) => {
     if (entry.kind === "follow-up") {
@@ -1318,7 +1338,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         return;
       }
 
-      if (e.key === "Enter" && !e.shiftKey) {
+      // Soft keyboards rarely offer Shift+Enter; on the mobile breakpoint Enter
+      // inserts a newline and the Send button submits.
+      if (e.key === "Enter" && !e.shiftKey && !isMobile) {
         e.preventDefault();
         if (isStreaming && (onSteer || onFollowUp)) {
           // Submit-during-run behavior comes from Settings (Steer current run
@@ -1331,7 +1353,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }
       }
     },
-    [isStreaming, onSteer, onFollowUp, onAbort, onMinimize, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value, isRecording, isTranscribing, cancelDictation, stopDictation, toggleDictation]
+    [isMobile, isStreaming, onSteer, onFollowUp, onAbort, onMinimize, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value, isRecording, isTranscribing, cancelDictation, stopDictation, toggleDictation]
   );
 
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
@@ -1515,6 +1537,27 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
          padding: "0 16px calc(8px + env(safe-area-inset-bottom))",
       }}
     >
+      <ConfirmDialog
+        open={activeDeleteTarget !== null}
+        onOpenChange={(open) => { if (!open) setQueuedDeleteTarget(null); }}
+        title={t("chatInput.queuedDeleteTitle")}
+        description={(
+          <>
+            {t("chatInput.queuedDeleteConfirmBody")}
+            <span style={{ display: "block", marginTop: 12, maxHeight: 180, overflowY: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+              {activeDeleteTarget?.text}
+            </span>
+          </>
+        )}
+        confirmLabel={t("chatInput.queuedDelete")}
+        cancelLabel={t("chatInput.cancel")}
+        danger
+        onConfirm={() => {
+          if (!activeDeleteTarget) return;
+          setQueuedDeleteTarget(null);
+          onRemoveQueuedMessage?.(activeDeleteTarget.text);
+        }}
+      />
       {/* Hidden file input */}
       <input
         ref={fileInputRef}
@@ -2187,9 +2230,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 <QueuedActionButton onClick={handleQueuedDelete} title={t("chatInput.queuedDeleteTitle")}>
                   {t("chatInput.queuedDelete")}
                 </QueuedActionButton>
-                <QueuedActionButton onClick={handleQueuedSteer} title={t("chatInput.queuedSteerTitle")} accent>
-                  {t("chatInput.queuedSteerAction")}
-                </QueuedActionButton>
+                {firstQueued?.kind === "follow-up" && (
+                  <QueuedActionButton onClick={handleQueuedSteer} title={t("chatInput.queuedSteerTitle")} accent>
+                    {t("chatInput.queuedSteerAction")}
+                  </QueuedActionButton>
+                )}
               </div>
             ) : (
               <div>
