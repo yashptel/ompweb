@@ -34,6 +34,7 @@ import { getDraftSummary } from "@/lib/draft-store";
 interface Props {
   session: SessionInfo | null;
   newSessionCwd: string | null;
+  newSessionWorkspace?: ReactNode;
   toolCallsDefaultCollapsed?: boolean;
   onAgentEnd?: () => void;
   onSessionCreated?: (session: SessionInfo) => void;
@@ -494,7 +495,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
   );
 });
 
-export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed = true, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenProviders }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCallsDefaultCollapsed = true, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenProviders }: Props) {
   const { t, tn } = useI18n();
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -527,6 +528,7 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
     notices, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     isAutoModelSelection,
     agentPhase, composerModes, updateComposerModes,
+    liveToolResults,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases,
     isNew,
     sessionIdRef, messagesEndRef, scrollContainerRef,
@@ -841,6 +843,23 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
     });
     return { toolResultsMap, lastAnchorIdx, hasCompaction, visibleRefIndexByMessage };
   }, [messages]);
+  // Runtime tool results span committed messages plus the tool calls omp is
+  // still executing. A committed result always wins; the live snapshot only
+  // covers the window between `tool_execution_start` and the toolResult message
+  // landing, which is what makes the row show a running indicator and streamed
+  // output instead of a dead "no result" row.
+  const toolResultsWithLive = useMemo<Map<string, ToolResultMessage>>(() => {
+    if (liveToolResults.size === 0) return conversationMeta.toolResultsMap;
+    const merged = new Map(liveToolResults);
+    for (const [toolCallId, result] of conversationMeta.toolResultsMap) merged.set(toolCallId, result);
+    return merged;
+  }, [liveToolResults, conversationMeta]);
+  const conversationMetaWithLive = useMemo(
+    () => (toolResultsWithLive === conversationMeta.toolResultsMap
+      ? conversationMeta
+      : { ...conversationMeta, toolResultsMap: toolResultsWithLive }),
+    [conversationMeta, toolResultsWithLive],
+  );
   // The ref array is sized by the count of user/assistant messages — exactly
   // what conversationMeta's visibleRefIndexByMessage already tallies, so no
   // separate filter pass (which would re-run on every streaming frame).
@@ -1119,6 +1138,7 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
                 <OmpRuntimeVersion />
               </div>
             </div>
+            <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>{newSessionWorkspace}</div>
             <NoticeShelf notices={notices} onDismiss={dismissNotice} align="right" />
             {chatInputElement}
           </div>
@@ -1177,7 +1197,7 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
             <CommittedTranscript
               messages={messages}
               entryIds={entryIds}
-              conversationMeta={conversationMeta}
+              conversationMeta={conversationMetaWithLive}
               messageRefs={messageRefs}
               isStreaming={streamState.isStreaming}
               sessionBusy={sessionBusy}
@@ -1203,6 +1223,7 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
                 modelNames={modelNames}
                 cwd={messageCwd}
                 onOpenFile={onOpenFile}
+                toolResults={toolResultsWithLive}
                 toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
                 liveTokensPerSecond={tokensPerSecond}
               />
