@@ -1700,6 +1700,72 @@ pre, code {
 .chat-input-shell:focus-within {
   transform: none;
 }
+.composer-toolbar {
+  container-type: inline-size;
+}
+.composer-toolbar > button {
+  flex-shrink: 0;
+}
+.composer-model-control {
+  flex: 1 1 0;
+  max-width: 140px;
+  min-width: 24px !important;
+}
+.composer-thinking-control {
+  flex: 0 1 auto;
+  min-width: 24px !important;
+  max-width: 100px;
+}
+.composer-primary-action {
+  flex-shrink: 0;
+  min-width: 7em;
+  justify-content: center;
+  white-space: nowrap;
+  min-height: 28px;
+  padding: 4px 10px;
+  line-height: 20px;
+}
+@container (max-width: 400px) {
+  .composer-model-control > button > svg:first-child,
+  .composer-thinking-control > button > svg:first-child,
+  .composer-fast-control > span {
+    display: none;
+  }
+  .composer-fast-control {
+    justify-content: center;
+    width: 28px;
+    padding-inline: 0 !important;
+  }
+}
+@container (max-width: 300px) {
+  .composer-model-control,
+  .composer-thinking-control {
+    flex: 0 0 24px;
+  }
+  .composer-model-control > button,
+  .composer-thinking-control > button {
+    justify-content: center;
+    gap: 0 !important;
+  }
+  .composer-model-control > button > svg:first-child,
+  .composer-thinking-control > button > svg:first-child {
+    display: block;
+  }
+  .composer-model-control > button > span,
+  .composer-model-control > button > svg:last-child,
+  .composer-thinking-control > button > span,
+  .composer-thinking-control > button > svg:last-child {
+    display: none;
+  }
+  .composer-toolbar > button:not(.composer-primary-action),
+  .composer-toolbar > div > button,
+  .composer-toolbar > span {
+    width: 24px !important;
+  }
+  .composer-primary-action {
+    padding-inline: 6px;
+  }
+}
 .composer-control-shelf {
   animation: ui-slide-up var(--dur-fast) var(--ease-out-warm) both;
 }
@@ -2820,6 +2886,18 @@ html.dark .dropdown-surface :is(select, option) {
   flex-wrap: nowrap;
   justify-content: space-between;
 }
+.shell-topbar-overflow {
+  display: contents;
+}
+.shell-topbar-overflow > summary {
+  display: none;
+}
+.shell-topbar-overflow-content {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 100%;
+}
 .shell-topbar-center {
   position: absolute;
   top: 4.5px;
@@ -2859,9 +2937,47 @@ html.dark .dropdown-surface :is(select, option) {
   .shell-topbar [data-topbar-right-group] {
     padding: 0 !important;
   }
+  .shell-topbar-overflow[data-compact="pending"] {
+    display: block;
+  }
+  .shell-topbar-overflow[data-compact="pending"] > summary {
+    display: flex;
+    list-style: none;
+  }
+  .shell-topbar-overflow[data-compact="pending"] > .shell-topbar-overflow-content {
+    display: none;
+  }
 }
 
-@container topbar-speed (max-width: 60px) {
+.shell-topbar-overflow[data-compact="true"] {
+  display: block;
+}
+.shell-topbar-overflow[data-compact="true"] > summary {
+  display: flex;
+  list-style: none;
+}
+.shell-topbar-overflow > summary::-webkit-details-marker {
+  display: none;
+}
+.shell-topbar-overflow[data-compact="true"]:not([open]) > .shell-topbar-overflow-content {
+  display: none;
+}
+.shell-topbar-overflow[data-compact="true"] > .shell-topbar-overflow-content {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 4px;
+  right: 4px;
+  height: 48px;
+  gap: 4px;
+  padding: 4px;
+  z-index: 500;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  box-shadow: var(--shadow-pop);
+}
+
+@container topbar-speed (width < calc(10ch + 33px)) {
   .shell-metric-pill {
     display: none !important;
   }
@@ -3059,7 +3175,7 @@ html.dark .dropdown-surface :is(select, option) {
 }
 .tool-call-command {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 7px;
   min-width: 0;
   padding: 5px 8px;
@@ -3074,11 +3190,50 @@ html.dark .dropdown-surface :is(select, option) {
   flex: 0 0 auto;
 }
 .tool-call-command code {
+  flex: 1;
   min-width: 0;
   overflow: hidden;
   color: var(--text);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.tool-call-input-toggle {
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 4px;
+  border-radius: var(--radius-control);
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+.tool-call-input-toggle:hover {
+  background: var(--bg-hover);
+}
+.tool-call-input-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.tool-call-input {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.tool-call-input dl, .tool-call-input dd, .tool-call-input pre {
+  margin: 0;
+}
+.tool-call-input dl > div + div {
+  margin-top: 8px;
+}
+.tool-call-input dt {
+  color: var(--text-muted);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.tool-call-input pre {
+  color: var(--text);
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .tool-call-output {
   max-height: 260px;

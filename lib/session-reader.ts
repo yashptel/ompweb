@@ -111,10 +111,13 @@ export async function listAllSessions(): Promise<SessionInfo[]> {
     return globalThis.__piSessionListPromise;
   }
 
+  // Flipped once the watchdog below retires this scan: a hung load that
+  // resolves after the slot moved on must not overwrite fresher cache data.
+  let retired = false;
   const loadPromise = loadAllSessions().then((data) => {
     // An invalidation may happen while the scan is in flight. Do not let that
     // older result repopulate the cache after a session mutation.
-    if ((globalThis.__piSessionListGeneration ?? 0) === generation) {
+    if ((globalThis.__piSessionListGeneration ?? 0) === generation && !retired) {
       globalThis.__piSessionListCache = { data, ts: Date.now() };
     }
     return data;
@@ -125,6 +128,23 @@ export async function listAllSessions(): Promise<SessionInfo[]> {
       globalThis.__piSessionListPromiseGeneration = undefined;
     }
   });
+  // A load that never settles (a stuck sync syscall, a hung git spawn that
+  // slipped past its timeout) must not be handed to every future caller
+  // forever — the coalescing slot would pin the wedge until process restart.
+  // Drop the slot after a generous deadline; the cache stays unset, so the
+  // next request starts a fresh scan.
+  const watchdog = setTimeout(() => {
+    if (globalThis.__piSessionListPromise === trackedPromise) {
+      globalThis.__piSessionListPromise = undefined;
+      globalThis.__piSessionListPromiseGeneration = undefined;
+      retired = true;
+    }
+  }, SESSION_LIST_LOAD_DEADLINE_MS);
+  watchdog.unref?.();
+
+  globalThis.__piSessionListPromise = trackedPromise;
+  globalThis.__piSessionListPromiseGeneration = generation;
+  watchdog.unref?.();
 
   globalThis.__piSessionListPromise = trackedPromise;
   globalThis.__piSessionListPromiseGeneration = generation;
@@ -144,6 +164,8 @@ declare global {
 }
 
 const SESSION_LIST_CACHE_TTL_MS = 30_000;
+/** Beyond this, an unsettled in-flight list load stops being coalesced. */
+const SESSION_LIST_LOAD_DEADLINE_MS = 60_000;
 
 /** Invalidate the session LIST metadata (30s TTL result + generation gate)
  * and the directory-walk cache, but leave per-session parse caches intact.
@@ -560,7 +582,7 @@ export function getTodoPhasesFromEntries(entries: SessionEntry[], leafId?: strin
     entry = entry.parentId ? byId.get(entry.parentId) : undefined;
   }
 
-  for (let index = path.length - 1; index >= 0; index--) {
+  for (let index = 0; index < path.length; index++) {
     const current = path[index];
     if (current.type === "custom" && current.customType === "user_todo_edit") {
       const phases = isRecord(current.data) ? parseTodoPhases(current.data.phases) : null;
@@ -830,6 +852,56 @@ function keepTaskToolResultDetails(details: Record<string, unknown>): Record<str
   return Object.keys(kept).length > 0 ? kept : null;
 }
 
+function keepHubToolResultDetails(details: Record<string, unknown>): Record<string, unknown> | null {
+  const op = details.op;
+  if (typeof op !== "string" || (op !== "send" && op !== "jobs")) return null;
+  const kept: Record<string, unknown> = { op };
+  if (op === "send") {
+    const to = hubDetailTargets(details.to);
+    if (to) kept.to = to;
+    if (Array.isArray(details.receipts)) {
+      const receipts = details.receipts
+        .slice(0, TASK_DETAIL_MAX_ROWS)
+        .map((raw) => {
+          if (!isRecord(raw)) return null;
+          const out: Record<string, string> = {};
+          if (typeof raw.to === "string") out.to = truncateTaskDetailText(raw.to);
+          if (typeof raw.outcome === "string") out.outcome = truncateTaskDetailText(raw.outcome);
+          return Object.keys(out).length > 0 ? out : null;
+        })
+        .filter((entry): entry is Record<string, string> => entry !== null);
+      if (receipts.length > 0) kept.receipts = receipts;
+    }
+  } else {
+    if (Array.isArray(details.jobs)) {
+      const jobs = details.jobs
+        .slice(0, TASK_DETAIL_MAX_ROWS)
+        .map((raw) => {
+          if (!isRecord(raw)) return null;
+          const out: Record<string, unknown> = {};
+          for (const key of ["id", "type", "status", "label", "resolvedModel"] as const) {
+            if (typeof raw[key] === "string") out[key] = truncateTaskDetailText(raw[key]);
+          }
+          if (typeof raw.durationMs === "number" && Number.isFinite(raw.durationMs)) out.durationMs = raw.durationMs;
+          return Object.keys(out).length > 0 ? out : null;
+        })
+        .filter((entry): entry is Record<string, unknown> => entry !== null);
+      if (jobs.length > 0) kept.jobs = jobs;
+    }
+  }
+  return Object.keys(kept).length > 1 ? kept : null;
+}
+
+function hubDetailTargets(value: unknown): string[] | undefined {
+  const list = Array.isArray(value) ? value : typeof value === "string" ? [value] : undefined;
+  if (!list) return undefined;
+  const out = list
+    .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+    .slice(0, TASK_DETAIL_MAX_ROWS)
+    .map((entry) => truncateTaskDetailText(entry));
+  return out.length > 0 ? out : undefined;
+}
+
 function stripToolResultDetails(message: AgentMessage): AgentMessage {
   if (message.role !== "toolResult" || message.details === undefined) return message;
   const { details, ...rest } = message;
@@ -840,6 +912,10 @@ function stripToolResultDetails(message: AgentMessage): AgentMessage {
     if (message.toolName === "task") {
       const taskDetails = keepTaskToolResultDetails(details);
       if (taskDetails) Object.assign(kept, taskDetails);
+    }
+    if (message.toolName === "hub") {
+      const hubDetails = keepHubToolResultDetails(details);
+      if (hubDetails) Object.assign(kept, hubDetails);
     }
     if (Object.keys(kept).length > 0) return { ...rest, details: kept };
   }
