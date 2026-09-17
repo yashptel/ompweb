@@ -568,6 +568,18 @@ html.dark {
   }
 }
 
+/* iOS Safari / WKWebView zooms the page when an editable control with a computed
+   font-size below 16px gains focus. There is no user-facing toggle, and
+   `maximum-scale=1` has been ignored since iOS 17.4, so the reliable fix is to
+   floor form-control font size at 16px on small screens (see issue #87). */
+@media (max-width: 640px) {
+  input,
+  textarea,
+  select {
+    font-size: max(16px, 1em) !important;
+  }
+}
+
 /* General UI scale / density scaling tokens — zoom is non-standard but supported in Chromium; keep both zoom and transform for coverage. */
 @layer base {
   :root {
@@ -1518,66 +1530,41 @@ pre, code {
 }
 
 .session-item-trailing {
+  width: 68px;
+  gap: 2px;
   height: 24px;
 }
 .session-item-metadata {
-  width: 100%;
+  width: auto;
 }
 .session-item-time {
   width: 42px;
-}
-.session-item-actions {
-  position: absolute;
-  opacity: 0;
-  pointer-events: none;
 }
 .session-item-menu-button {
   width: 24px;
   height: 24px;
 }
-[data-actions-visible="true"] .session-item-metadata {
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-}
-[data-actions-visible="true"] .session-item-actions {
-  opacity: 1;
-  pointer-events: auto;
-}
-
 .sidebar-project-actions {
-  visibility: hidden;
-}
-.sidebar-project-actions[data-actions-visible="true"] {
-  visibility: visible;
+  /* Match the session status column after reserving timestamp + menu space. */
+  width: 46px;
+  display: flex;
+  justify-content: flex-end;
 }
 
 /* Touch rows keep the compact timestamp immediately beside a full-size menu target. */
 @media (hover: none), (pointer: coarse) {
   .sidebar-project-actions {
-    visibility: visible;
+    width: 56px;
   }
   .session-item-row {
     min-height: 44px;
   }
   .session-item-trailing {
-    --session-trailing-width: auto;
+    width: 78px;
     height: 44px;
-    gap: 2px;
-  }
-  .session-item-row .session-item-metadata {
-    width: auto;
-    opacity: 1;
-    visibility: visible;
-    pointer-events: auto;
   }
   .session-item-time {
     width: 32px;
-  }
-  .session-item-row .session-item-actions {
-    position: static;
-    opacity: 1;
-    pointer-events: auto;
   }
   .session-item-menu-button {
     width: 44px;
@@ -2711,6 +2698,35 @@ html.dark .dropdown-surface :is(select, option) {
    content. */
 .chat-message {
   animation: chat-message-in var(--dur-med) var(--ease-out-warm) both;
+}
+
+.message-copy-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px;
+}
+.message-copy-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 3px 8px;
+  border: none;
+  border-radius: var(--radius-control);
+  background: none;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+.message-copy-action:hover {
+  color: var(--accent);
+  background: var(--bg-hover);
+}
+@media (pointer: coarse) {
+  .message-copy-action {
+    min-height: 44px;
+  }
 }
 
 @keyframes toast-in {

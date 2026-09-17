@@ -3,6 +3,7 @@
 import { memo, useState, useId, useRef, useEffect, useMemo, useCallback, type ComponentProps } from "react";
 import { Box, Copy, Check, GitFork, CornerUpLeft, ChevronRight, ChevronDown, Brain, EyeOff, CircleAlert, CircleSlash, LoaderCircle, FileText, Paperclip, Search, FileEdit, Terminal, CheckSquare, Bot, Code2, Globe, MessagesSquare, Wrench } from "lucide-react";
 import { MarkdownBody } from "./MarkdownBody";
+import { MessageCopyActions } from "./MessageCopyActions";
 import { ClickableImage } from "./ImageLightbox";
 import { translate, useI18n, type Locale } from "@/lib/i18n";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
@@ -194,6 +195,8 @@ interface Props {
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
   entryId?: string;
+  /** Entry omp's `branch` command accepts for this message (a user entry, #103). */
+  forkEntryId?: string;
   onFork?: (entryId: string) => void;
   forking?: boolean;
   onNavigate?: (entryId: string) => boolean | Promise<boolean>;
@@ -234,12 +237,12 @@ function haveSameRelevantToolResults(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, sessionId, toolCallsDefaultCollapsed = true, liveTokensPerSecond }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, forkEntryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, sessionId, toolCallsDefaultCollapsed = true, liveTokensPerSecond }: Props) {
   if (message.role === "user") {
     return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} onNavigate={onNavigate} prevAssistantEntryId={prevAssistantEntryId} onEditContent={onEditContent} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} liveTokensPerSecond={liveTokensPerSecond} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} forkEntryId={forkEntryId} onFork={onFork} forking={forking} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} liveTokensPerSecond={liveTokensPerSecond} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -270,6 +273,7 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.cwd === next.cwd
     && prev.onOpenFile === next.onOpenFile
     && prev.entryId === next.entryId
+    && prev.forkEntryId === next.forkEntryId
     && prev.onFork === next.onFork
     && prev.forking === next.forking
     && prev.onNavigate === next.onNavigate
@@ -295,6 +299,46 @@ function imageBlockSrc(img: ImageContent): string {
       : "";
 }
 
+/**
+ * "New session" (fork) action, shared by user and assistant messages.
+ *
+ * omp's `branch` command accepts a user-message entry only (an assistant entry
+ * answers "Invalid entry ID for branching"), so `entryId` is the branch point
+ * resolved by `resolveForkEntryIds` — for an assistant reply, the user prompt
+ * that started its turn (#103).
+ */
+function ForkSessionButton({ entryId, onFork, forking }: {
+  entryId: string;
+  onFork: (entryId: string) => void;
+  forking?: boolean;
+}) {
+  const { t } = useI18n();
+  return (
+    <Tooltip content={forking ? t("messageView.creatingSession") : t("messageView.newSessionTitle")}>
+      <button
+        onClick={() => { onFork(entryId); }}
+        disabled={forking}
+        aria-label={forking ? t("messageView.creatingSession") : t("messageView.newSessionTitle")}
+        style={{
+          display: "flex", alignItems: "center", gap: 4,
+          padding: "3px 8px", height: 24, minHeight: 24,
+          background: "none", border: "none",
+          borderRadius: 5,
+          color: forking ? "var(--accent)" : "var(--text-dim)",
+          cursor: forking ? "not-allowed" : "pointer",
+          fontSize: 11, fontWeight: 400,
+          whiteSpace: "nowrap",
+          transition: "color var(--dur-fast) var(--ease-out-warm)",
+        }}
+        onMouseEnter={(e) => { if (!forking) e.currentTarget.style.color = "var(--accent)"; }}
+        onMouseLeave={(e) => { if (!forking) e.currentTarget.style.color = "var(--text-dim)"; }}
+      >
+        <GitFork size={11} strokeWidth={1.8} />
+        {forking ? t("messageView.creating") : t("messageView.newSession")}
+      </button>
+    </Tooltip>
+  );
+}
 function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent }: {  message: UserMessage;
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
@@ -306,9 +350,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
   onEditContent?: (content: string) => void;
 }) {
   const { t, locale } = useI18n();
-  const [hovered, setHovered] = useState(false);
-  const [actionsActive, setActionsActive] = useState(false);
-  const { copied, copy: copyContent } = useCopyFeedback();
+  const bodyRef = useRef<HTMLDivElement>(null);
 
   const content =
     typeof message.content === "string"
@@ -330,12 +372,11 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
   return (
     <div
       style={{ marginBottom: 18, display: "flex", flexDirection: "column", alignItems: "flex-end", paddingRight: 6 }}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
     >
       <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", maxWidth: "85%", minWidth: 0 }}>
         <div
           className="chat-message-card"
+          ref={bodyRef}
           data-selection-scope="message"
           tabIndex={-1}
           style={{
@@ -397,7 +438,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
                     ))}
                   </div>
                 )}
-                {body && <SafeMarkdownBody className="markdown-user-message" cwd={cwd} onOpenFile={onOpenFile}>{body}</SafeMarkdownBody>}
+                {body && <div data-message-text><SafeMarkdownBody className="markdown-user-message" cwd={cwd} onOpenFile={onOpenFile}>{body}</SafeMarkdownBody></div>}
                 {documents.length > 0 && (
                   <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: body ? 8 : 0 }}>
                     {documents.map((document) => (
@@ -432,54 +473,16 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
 
         {/* Bottom row: action buttons + timestamp — inside the bubble's column,
             spanning its width, so the timestamp aligns with its right edge. */}
-        {(time || canFork || canNavigate) && (
           <div style={{
-            display: "flex", alignItems: "center", justifyContent: "flex-end",
+            display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "flex-end",
             gap: 6, marginTop: 3, width: "100%",
           }}>
-          <div
-            style={{
-              display: "flex", gap: 3,
-              opacity: hovered || actionsActive ? 1 : 0,
-              pointerEvents: hovered || actionsActive ? "auto" : "none",
-              transition: "opacity var(--dur-fast) var(--ease-out-warm)",
-            }}
-            onFocusCapture={() => setActionsActive(true)}
-            onBlurCapture={() => setActionsActive(false)}
-          >
-            <Tooltip content={t("messageView.copyMessage")}>
-              <button
-                onClick={() => copyContent(content)}
-                aria-label={t("messageView.copyMessage")}
-                style={{
-                  display: "flex", alignItems: "center", gap: 4,
-                  padding: "3px 8px", height: 24, minHeight: 24,
-                  background: "none", border: "none",
-                  borderRadius: 5,
-                  color: copied ? "var(--accent)" : "var(--text-dim)",
-                  cursor: "pointer",
-                  fontSize: 11, fontWeight: 400,
-                  whiteSpace: "nowrap",
-                  transition: "color var(--dur-fast) var(--ease-out-warm)",
-                }}
-                onMouseEnter={(e) => { if (!copied) e.currentTarget.style.color = "var(--accent)"; }}
-                onMouseLeave={(e) => { if (!copied) e.currentTarget.style.color = "var(--text-dim)"; }}
-              >
-                {copied ? <Check size={11} strokeWidth={1.8} /> : <Copy size={11} strokeWidth={1.8} />}
-                {copied ? t("messageView.copied") : t("messageView.copy")}
-              </button>
-            </Tooltip>
-          </div>
+          <MessageCopyActions texts={[content]} bodyRef={bodyRef} />
           {(canFork || canNavigate) && (
             <div
               style={{
-                display: "flex", gap: 3,
-                opacity: (hovered || actionsActive || forking) ? 1 : 0,
-                pointerEvents: (hovered || actionsActive || forking) ? "auto" : "none",
-                transition: "opacity var(--dur-fast) var(--ease-out-warm)",
+                display: "flex", flexWrap: "wrap", justifyContent: "flex-end", gap: 3,
               }}
-              onFocusCapture={() => setActionsActive(true)}
-              onBlurCapture={() => setActionsActive(false)}
             >
               {canNavigate && (
                 <Tooltip content={t("messageView.editFromHereTitle")}>
@@ -506,35 +509,12 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
                 </Tooltip>
               )}
               {canFork && (
-                <Tooltip content={forking ? t("messageView.creatingSession") : t("messageView.newSessionTitle")}>
-                  <button
-                    onClick={() => { onFork!(entryId!); }}
-                    disabled={forking}
-                    aria-label={forking ? t("messageView.creatingSession") : t("messageView.newSessionTitle")}
-                    style={{
-                      display: "flex", alignItems: "center", gap: 4,
-                      padding: "3px 8px", height: 24, minHeight: 24,
-                      background: "none", border: "none",
-                      borderRadius: 5,
-                      color: forking ? "var(--accent)" : "var(--text-dim)",
-                      cursor: forking ? "not-allowed" : "pointer",
-                      fontSize: 11, fontWeight: 400,
-                      whiteSpace: "nowrap",
-                      transition: "color var(--dur-fast) var(--ease-out-warm)",
-                    }}
-                    onMouseEnter={(e) => { if (!forking) e.currentTarget.style.color = "var(--accent)"; }}
-                    onMouseLeave={(e) => { if (!forking) e.currentTarget.style.color = "var(--text-dim)"; }}
-                  >
-                    <GitFork size={11} strokeWidth={1.8} />
-                    {forking ? t("messageView.creating") : t("messageView.newSession")}
-                  </button>
-                </Tooltip>
+                <ForkSessionButton entryId={entryId!} onFork={onFork!} forking={forking} />
               )}
             </div>
           )}
           {time && <span style={{ fontSize: 10, color: "var(--text-dim)" }}>{time}</span>}
           </div>
-        )}
       </div>
     </div>
   );
@@ -565,6 +545,9 @@ function AssistantMessageView({
   prevTimestamp,
   sessionId,
   entryId,
+  forkEntryId,
+  onFork,
+  forking,
   toolCallsDefaultCollapsed,
   liveTokensPerSecond,
 }: {
@@ -578,11 +561,18 @@ function AssistantMessageView({
   prevTimestamp?: number;
   sessionId?: string;
   entryId?: string;
+  /** User entry omp's `branch` command accepts for this reply (#103). */
+  forkEntryId?: string;
+  onFork?: (entryId: string) => void;
+  forking?: boolean;
   toolCallsDefaultCollapsed: boolean;
   liveTokensPerSecond?: number | null;
 }) {
   const { t, locale } = useI18n();
   const time = showTimestamp ? formatTime(message.timestamp, locale) : null;
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const texts = (message.content ?? []).filter((block): block is TextContent => block.type === "text").map((block) => block.text);
+  const canFork = !!forkEntryId && !!onFork;
   const blockItems = (message.content ?? [])
     .map((block, originalIndex) => ({ block, originalIndex }))
     .filter(({ block }) => !isEmptyThinkingBlock(block, { isStreaming }));
@@ -726,7 +716,7 @@ function AssistantMessageView({
         })()}
       </div>
 
-      <div data-selection-scope="message" tabIndex={-1} style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+      <div ref={bodyRef} data-selection-scope="message" tabIndex={-1} style={{ display: "flex", flexDirection: "column", gap: 3 }}>
         {groupAdjacentBlocks(blockItems).map((group, groupIdx) => {
           if (group.type === "single") {
             const { block, originalIndex } = group.item;
@@ -804,9 +794,13 @@ function AssistantMessageView({
         )}
       </div>
 
-      {time && !isStreaming && (
-        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 3 }}>
-          <span style={{ fontSize: 10, color: "var(--text-dim)" }}>{time}</span>
+      {!isStreaming && (texts.some((text) => text.trim()) || time || canFork) && (
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 6, marginTop: 3 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 3 }}>
+            <MessageCopyActions texts={texts} bodyRef={bodyRef} />
+            {canFork && <ForkSessionButton entryId={forkEntryId!} onFork={onFork!} forking={forking} />}
+          </div>
+          {time && <span style={{ fontSize: 10, color: "var(--text-dim)", marginLeft: "auto" }}>{time}</span>}
         </div>
       )}
     </div>
@@ -835,7 +829,7 @@ function BlockView({ block, toolResults, isStreaming, streamingDuration, toolCal
 // skip their ReactMarkdown re-parse and only the actively growing block
 // re-renders per frame.
 const TextBlock = memo(function TextBlock({ block, isStreaming, cwd, onOpenFile }: { block: TextContent; isStreaming?: boolean; cwd?: string; onOpenFile?: (filePath: string) => void }) {
-  return <SafeMarkdownBody isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile}>{block.text}</SafeMarkdownBody>;
+  return <div data-message-text><SafeMarkdownBody isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile}>{block.text}</SafeMarkdownBody></div>;
 }, (prev, next) => (
   prev.block.text === next.block.text
   && prev.isStreaming === next.isStreaming

@@ -20,12 +20,14 @@ export type HostSegment =
   | { readonly kind: "text"; readonly value: string }
   | { readonly kind: "pill"; readonly skill: string };
 
+// nodeType, not `instanceof`: a document from another realm (jsdom under the
+// test runner, an iframe) carries its own Text and HTMLElement constructors.
 function isText(node: Node | null | undefined): node is Text {
-  return node instanceof Text;
+  return !!node && node.nodeType === 3;
 }
 
 function isElement(node: Node | null | undefined): node is HTMLElement {
-  return node instanceof HTMLElement;
+  return !!node && node.nodeType === 1;
 }
 
 function isPill(node: Node | null | undefined): node is HTMLElement {

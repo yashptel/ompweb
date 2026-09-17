@@ -6,6 +6,7 @@ import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecuti
 import { translate, useI18n } from "@/lib/i18n";
 import { getDisplayableAssistantBlocks, splitFinalAssistantBlocks } from "@/lib/message-display";
 import { isGroupAnchor, planTranscriptRows, type TranscriptRow } from "@/lib/chat-transcript-plan";
+import { resolveForkEntryIds } from "@/lib/chat-fork";
 import { MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ExtensionDialog } from "./ExtensionDialog";
@@ -101,25 +102,37 @@ function withAssistantBlocks(
   return next;
 }
 
-function OmpRuntimeVersion() {
+// Retain the last successful value across welcome-screen remounts, not reloads.
+let lastKnownOmpVersion: string | undefined;
+
+export function OmpRuntimeVersion() {
   const { t } = useI18n();
-  const [version, setVersion] = useState<string | null>(null);
+  const [version, setVersion] = useState<string | null | undefined>(lastKnownOmpVersion);
   useEffect(() => {
     let cancelled = false;
     fetch("/api/omp-version")
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: { version: string | null } | null) => {
-        // omp reports "omp/17.1.3"; show just the number next to the label.
-        if (!cancelled && data?.version) setVersion(data.version.replace(/^omp\//, ""));
+      .then((res) => {
+        if (!res.ok) throw new Error(`Version lookup failed: HTTP ${res.status}`);
+        return res.json();
       })
-      .catch(() => {});
+      .then((data: { version: string | null } | null) => {
+        if (cancelled) return;
+        // omp reports "omp/17.1.3"; show just the number next to the label.
+        const nextVersion = typeof data?.version === "string" ? data.version.trim().replace(/^omp\//, "") : "";
+        lastKnownOmpVersion = nextVersion || undefined;
+        setVersion(nextVersion || null);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setVersion(lastKnownOmpVersion ?? null);
+      });
     return () => {
       cancelled = true;
     };
   }, []);
   return (
-    <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-      omp <span style={{ color: "var(--text)" }}>{version ? `v${version}` : t("chatWindow.versionNotFound")}</span>
+    <span aria-busy={version === undefined} style={{ fontSize: 11, color: "var(--text-muted)" }}>
+      omp <span style={{ color: "var(--text)" }}>{version === undefined ? t("appShell.loading") : version ? `v${version}` : t("chatWindow.versionNotFound")}</span>
     </span>
   );
 }
@@ -329,6 +342,12 @@ const CommittedTranscript = memo(function CommittedTranscript({
 }: CommittedTranscriptProps) {
   const { t } = useI18n();
   const { toolResultsMap, lastAnchorIdx, visibleRefIndexByMessage } = conversationMeta;
+  // omp's `branch` command accepts a user entry only, so every row forks at the
+  // user prompt that started its turn (#103).
+  const forkEntryIds = useMemo(
+    () => resolveForkEntryIds(messages.map((message) => message.role), entryIds),
+    [messages, entryIds],
+  );
 
   const attachVisibleRef = (idx: number, refIndex: number) => (el: HTMLDivElement | null) => {
     messageRefs.current[refIndex] = el;
@@ -357,6 +376,9 @@ const CommittedTranscript = memo(function CommittedTranscript({
       }
     }
     if (options.showTimestamp !== undefined) showTimestamp = options.showTimestamp;
+    // Forking needs a branch point omp accepts, and a first user prompt has no
+    // earlier context to fork from — that one row keeps no fork action.
+    const canOfferFork = !sessionBusy && !isNew && !!forkEntryIds[idx] && !(idx === 0 && msg.role === "user");
     const view = (
       <MessageView
         key={`${keyPrefix}-view-${idx}`}
@@ -366,8 +388,9 @@ const CommittedTranscript = memo(function CommittedTranscript({
         cwd={messageCwd}
         onOpenFile={onOpenFile}
         entryId={entryIds[idx]}
-        onFork={sessionBusy || isNew || (idx === 0 && msg.role === "user") ? undefined : handleFork}
-        forking={forkingEntryId === entryIds[idx]}
+        forkEntryId={forkEntryIds[idx]}
+        onFork={canOfferFork ? handleFork : undefined}
+        forking={forkingEntryId === forkEntryIds[idx]}
         onNavigate={sessionBusy ? undefined : handleNavigate}
         prevAssistantEntryId={sessionBusy ? undefined : prevAssistantEntryId}
         onEditContent={handleEditContent}
